@@ -2,12 +2,14 @@
  * 悬浮胶囊与可折叠过滤面板 UI
  */
 
+import { V01Policy } from '../domain/policy';
+
 export interface FilterUIEvents {
   onKeywordChange: (keyword: string) => void;
   onClearKeyword: () => void;
+  onPolicyChange?: (policy: Partial<V01Policy>) => void;
   onTogglePanel?: (expanded: boolean) => void;
   onManualRecover?: () => void;
-  onPolicyChange?: () => void;
 }
 
 export interface UIStats {
@@ -29,7 +31,15 @@ export class FilterUI {
   private events: FilterUIEvents;
   private isExpanded: boolean = false;
 
-  constructor(events: FilterUIEvents) {
+  // Policy UI elements
+  private femaleCheckbox!: HTMLInputElement;
+  private maleCheckbox!: HTMLInputElement;
+  private unknownGenderCheckbox!: HTMLInputElement;
+  private regionInput!: HTMLInputElement;
+  private hideExcludedCheckbox!: HTMLInputElement;
+  private calibrationBadgeEl!: HTMLElement;
+
+  constructor(events: FilterUIEvents, initialPolicy?: V01Policy) {
     this.events = events;
     this.container = document.createElement('div');
     this.container.id = 'xhs-live-filter-root';
@@ -70,7 +80,7 @@ export class FilterUI {
     this.panelEl.className = 'xhs-filter-panel';
     this.panelEl.style.cssText = `
       display: none;
-      width: 280px;
+      width: 300px;
       background: #ffffff;
       border-radius: 12px;
       box-shadow: 0 8px 24px rgba(0,0,0,0.15);
@@ -85,12 +95,52 @@ export class FilterUI {
         <button class="panel-close-btn" style="background: none; border: none; font-size: 16px; cursor: pointer; color: #888;">✕</button>
       </div>
 
-      <div style="margin-bottom: 10px;">
+      <!-- 关键词筛选 -->
+      <div style="margin-bottom: 12px;">
         <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px; color: #555;">内容关键词</label>
         <div style="display: flex; gap: 6px;">
           <input type="text" class="keyword-input" placeholder="输入标题或昵称关键词..." style="flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; outline: none;" />
           <button class="clear-btn" style="padding: 6px 10px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 6px; cursor: pointer; font-size: 12px; white-space: nowrap;">清空</button>
         </div>
+      </div>
+
+      <!-- 性别筛选 (Ticket #4) -->
+      <div style="margin-bottom: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+          <label style="font-weight: 600; font-size: 12px; color: #555;">允许性别</label>
+          <span class="calibration-badge" style="font-size: 10px; color: #fa8c16; background: #fff7e6; padding: 1px 6px; border-radius: 4px; border: 1px solid #ffd591;">门禁: UNCALIBRATED (Fail-Open)</span>
+        </div>
+        <div style="display: flex; gap: 12px; font-size: 12px; color: #444;">
+          <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+            <input type="checkbox" class="gender-female" checked /> 女性
+          </label>
+          <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+            <input type="checkbox" class="gender-male" /> 男性
+          </label>
+          <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+            <input type="checkbox" class="gender-unknown" checked /> 未知/未校准
+          </label>
+        </div>
+      </div>
+
+      <!-- 偏好属地 (Ticket #3/4) -->
+      <div style="margin-bottom: 12px;">
+        <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px; color: #555;">偏好属地 (逗号分隔)</label>
+        <input type="text" class="region-input" value="广东" placeholder="如：广东,上海" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; outline: none;" />
+      </div>
+
+      <!-- 年龄 (置灰不可用) -->
+      <div style="margin-bottom: 12px; opacity: 0.6;">
+        <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px; color: #999;">年龄区间 (公开数据不可用 · 已禁用)</label>
+        <input type="text" disabled value="不限 (Fail-Open)" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #eee; border-radius: 6px; font-size: 12px; background: #fafafa; color: #aaa; cursor: not-allowed;" />
+      </div>
+
+      <!-- 视图控制：hideExcluded (默认关闭) -->
+      <div style="margin-bottom: 12px; padding-top: 6px; border-top: 1px dashed #eee;">
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #444; cursor: pointer;">
+          <input type="checkbox" class="hide-excluded-checkbox" />
+          <span>隐藏已排除主播 (默认低透明度保留)</span>
+        </label>
       </div>
 
       <div class="stats-section" style="padding: 8px; background: #f9f9f9; border-radius: 6px; font-size: 11px; color: #666; margin-bottom: 8px;">
@@ -112,6 +162,17 @@ export class FilterUI {
     const closeBtn = this.panelEl.querySelector('.panel-close-btn') as HTMLButtonElement;
     this.statsTextEl = this.panelEl.querySelector('.stats-text') as HTMLElement;
     this.recoverBtn = this.panelEl.querySelector('.recover-btn') as HTMLButtonElement;
+
+    this.femaleCheckbox = this.panelEl.querySelector('.gender-female') as HTMLInputElement;
+    this.maleCheckbox = this.panelEl.querySelector('.gender-male') as HTMLInputElement;
+    this.unknownGenderCheckbox = this.panelEl.querySelector('.gender-unknown') as HTMLInputElement;
+    this.regionInput = this.panelEl.querySelector('.region-input') as HTMLInputElement;
+    this.hideExcludedCheckbox = this.panelEl.querySelector('.hide-excluded-checkbox') as HTMLInputElement;
+    this.calibrationBadgeEl = this.panelEl.querySelector('.calibration-badge') as HTMLElement;
+
+    if (initialPolicy) {
+      this.syncPolicyToUI(initialPolicy);
+    }
 
     // 事件监听
     this.capsuleEl.addEventListener('click', () => this.togglePanel());
@@ -135,6 +196,58 @@ export class FilterUI {
         this.events.onManualRecover();
       }
     });
+
+    // 策略修改触发纯评估
+    const handlePolicyUpdate = () => {
+      const allowedGenders: string[] = [];
+      if (this.femaleCheckbox.checked) allowedGenders.push('female');
+      if (this.maleCheckbox.checked) allowedGenders.push('male');
+      if (this.unknownGenderCheckbox.checked) allowedGenders.push('unknown');
+
+      const regions = this.regionInput.value
+        .split(/[,，]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      const hideExcluded = this.hideExcludedCheckbox.checked;
+
+      if (this.events.onPolicyChange) {
+        this.events.onPolicyChange({
+          allowedGenders,
+          preferredRegions: regions,
+          hideExcluded,
+        });
+      }
+    };
+
+    this.femaleCheckbox.addEventListener('change', handlePolicyUpdate);
+    this.maleCheckbox.addEventListener('change', handlePolicyUpdate);
+    this.unknownGenderCheckbox.addEventListener('change', handlePolicyUpdate);
+    this.regionInput.addEventListener('input', handlePolicyUpdate);
+    this.hideExcludedCheckbox.addEventListener('change', handlePolicyUpdate);
+  }
+
+  syncPolicyToUI(policy: V01Policy): void {
+    this.keywordInput.value = policy.contentKeyword;
+    this.femaleCheckbox.checked = policy.allowedGenders.includes('female');
+    this.maleCheckbox.checked = policy.allowedGenders.includes('male');
+    this.unknownGenderCheckbox.checked = policy.allowedGenders.includes('unknown');
+    this.regionInput.value = policy.preferredRegions.join(', ');
+    this.hideExcludedCheckbox.checked = policy.hideExcluded;
+  }
+
+  setCalibrationStatus(status: 'UNCALIBRATED' | 'CALIBRATED'): void {
+    if (status === 'CALIBRATED') {
+      this.calibrationBadgeEl.textContent = '门禁: CALIBRATED';
+      this.calibrationBadgeEl.style.color = '#52c41a';
+      this.calibrationBadgeEl.style.background = '#f6ffed';
+      this.calibrationBadgeEl.style.borderColor = '#b7eb8f';
+    } else {
+      this.calibrationBadgeEl.textContent = '门禁: UNCALIBRATED (Fail-Open)';
+      this.calibrationBadgeEl.style.color = '#fa8c16';
+      this.calibrationBadgeEl.style.background = '#fff7e6';
+      this.calibrationBadgeEl.style.borderColor = '#ffd591';
+    }
   }
 
   mount(root: HTMLElement = document.body): void {

@@ -3,7 +3,8 @@
  */
 
 import { evaluate, EvaluationResult, matchContent } from './domain/evaluation';
-import { createUnknownFacts, NormalizedFacts } from './domain/facts';
+import { createUnknownFacts, NormalizedFacts, NormalizedGender } from './domain/facts';
+import { GenderCalibrationGate } from './domain/gender-calibration';
 import { DEFAULT_POLICY, V01Policy } from './domain/policy';
 import { extractCardInfo, ExtractedCardInfo } from './dom/card-extractor';
 import { CardObserver } from './dom/card-observer';
@@ -21,10 +22,11 @@ export class LiveFilterApp {
   private policy: V01Policy;
   private cache: ProfileCache;
   private fetcher: ProfileFetcher;
+  private calibrationGate: GenderCalibrationGate;
   private enrichmentQueue: string[] = [];
   private isEnriching: boolean = false;
 
-  constructor(customFetcher?: ProfileFetcher) {
+  constructor(customFetcher?: ProfileFetcher, calibrationGate?: GenderCalibrationGate) {
     // 读取持久化策略
     const savedKeyword = StorageAdapter.get<string>('contentKeyword', '');
     const savedRegions = StorageAdapter.get<string[]>('preferredRegions', DEFAULT_POLICY.preferredRegions);
@@ -40,12 +42,19 @@ export class LiveFilterApp {
 
     this.cache = new ProfileCache();
     this.fetcher = customFetcher || new ProfileFetcher();
+    this.calibrationGate = calibrationGate || new GenderCalibrationGate();
 
-    this.ui = new FilterUI({
-      onKeywordChange: (kw) => this.handleKeywordChange(kw),
-      onClearKeyword: () => this.handleKeywordChange(''),
-      onManualRecover: () => this.handleManualRecover(),
-    });
+    this.ui = new FilterUI(
+      {
+        onKeywordChange: (kw) => this.handleKeywordChange(kw),
+        onClearKeyword: () => this.handleKeywordChange(''),
+        onPolicyChange: (partialPolicy) => this.handlePolicyChange(partialPolicy),
+        onManualRecover: () => this.handleManualRecover(),
+      },
+      this.policy
+    );
+
+    this.ui.setCalibrationStatus(this.calibrationGate.getStatus());
 
     this.observer = new CardObserver({
       onCardDiscovered: (card) => this.handleCardDiscovered(card),
@@ -83,6 +92,8 @@ export class LiveFilterApp {
       // 检查缓存
       const cached = this.cache.get(info.userId);
       if (cached) {
+        // 根据当前校准门禁刷新 gender 归一化
+        cached.gender = this.calibrationGate.normalize(cached.rawGender);
         this.factsMap.set(info.userId, cached);
         this.applyCardEvaluation(info, cached);
       } else {
@@ -107,6 +118,9 @@ export class LiveFilterApp {
 
     try {
       const facts = await this.fetcher.fetchProfileFacts(userId);
+      // 应用校准门禁归一化
+      facts.gender = this.calibrationGate.normalize(facts.rawGender);
+
       this.cache.set(userId, facts);
       this.factsMap.set(userId, facts);
 
@@ -117,7 +131,6 @@ export class LiveFilterApp {
         }
       }
     } catch (err) {
-      // 若出现限流/验证码由后续 Ticket #4/#5 调度器熔断捕获，此处仅记录
       console.warn(`[xhs-live-filter] Enrich user ${userId} failed:`, err);
     } finally {
       this.isEnriching = false;
@@ -134,8 +147,34 @@ export class LiveFilterApp {
     this.refreshContentMatches();
   }
 
+  private handlePolicyChange(partialPolicy: Partial<V01Policy>): void {
+    this.policy = { ...this.policy, ...partialPolicy };
+    StorageAdapter.set('allowedGenders', this.policy.allowedGenders);
+    StorageAdapter.set('preferredRegions', this.policy.preferredRegions);
+    StorageAdapter.set('hideExcluded', this.policy.hideExcluded);
+
+    // Policy 修改重新 Evaluate 已有 Facts，绝对不重新发起 Profile 网络请求
+    this.refreshEvaluationsOnly();
+  }
+
   private handleManualRecover(): void {
     // 供 Ticket #5 扩展恢复逻辑
+  }
+
+  /**
+   * 应用平台公开核验的映射证据进行校准
+   * 重新计算已有 Facts，绝不重新拉取网络请求
+   */
+  calibrateGender(mapping: Record<string | number, NormalizedGender>): void {
+    this.calibrationGate.calibrate(mapping);
+    this.ui.setCalibrationStatus(this.calibrationGate.getStatus());
+
+    // 重新归一化所有已知 facts 的 gender
+    for (const facts of this.factsMap.values()) {
+      facts.gender = this.calibrationGate.normalize(facts.rawGender);
+    }
+
+    this.refreshEvaluationsOnly();
   }
 
   private evaluateContentMatch(info: ExtractedCardInfo): void {
@@ -155,13 +194,17 @@ export class LiveFilterApp {
     this.updateStats();
   }
 
-  private refreshAll(): void {
-    this.refreshContentMatches();
+  private refreshEvaluationsOnly(): void {
     for (const info of this.cards.values()) {
       const facts = info.userId ? this.factsMap.get(info.userId) || this.cache.get(info.userId) || createUnknownFacts(info.userId) : createUnknownFacts();
       this.applyCardEvaluation(info, facts);
     }
     this.updateStats();
+  }
+
+  private refreshAll(): void {
+    this.refreshContentMatches();
+    this.refreshEvaluationsOnly();
   }
 
   private updateStats(): void {
@@ -216,8 +259,11 @@ export class LiveFilterApp {
     return this.policy.contentKeyword;
   }
 
+  getCalibrationGate(): GenderCalibrationGate {
+    return this.calibrationGate;
+  }
+
   setPolicy(policy: Partial<V01Policy>): void {
-    this.policy = { ...this.policy, ...policy };
-    this.refreshAll();
+    this.handlePolicyChange(policy);
   }
 }
