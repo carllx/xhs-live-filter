@@ -144,7 +144,7 @@ describe('Ticket #3: Visible-card Profile Enrichment + 广东优先闭环', () =
     app.start(fixture);
 
     // 等待并发队列处理完毕
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 300));
 
     const card1 = fixture.querySelector('[data-id="card-1"]') as HTMLElement; // 广东
     const card2 = fixture.querySelector('[data-id="card-2"]') as HTMLElement; // 上海

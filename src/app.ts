@@ -9,8 +9,10 @@ import { DEFAULT_POLICY, V01Policy } from './domain/policy';
 import { extractCardInfo, ExtractedCardInfo } from './dom/card-extractor';
 import { CardObserver } from './dom/card-observer';
 import { CardPresenter } from './dom/card-presenter';
+import { CircuitBreaker } from './network/breaker';
 import { ProfileCache } from './network/cache';
 import { ProfileFetcher } from './network/profile-fetcher';
+import { ViewportScheduler } from './network/viewport-scheduler';
 import { StorageAdapter } from './storage/storage';
 import { FilterUI, UIStats } from './ui/filter-ui';
 
@@ -23,10 +25,14 @@ export class LiveFilterApp {
   private cache: ProfileCache;
   private fetcher: ProfileFetcher;
   private calibrationGate: GenderCalibrationGate;
-  private enrichmentQueue: string[] = [];
-  private isEnriching: boolean = false;
+  private breaker: CircuitBreaker;
+  private scheduler: ViewportScheduler;
 
-  constructor(customFetcher?: ProfileFetcher, calibrationGate?: GenderCalibrationGate) {
+  constructor(
+    customFetcher?: ProfileFetcher,
+    calibrationGate?: GenderCalibrationGate,
+    customBreaker?: CircuitBreaker
+  ) {
     // 读取持久化策略
     const savedKeyword = StorageAdapter.get<string>('contentKeyword', '');
     const savedRegions = StorageAdapter.get<string[]>('preferredRegions', DEFAULT_POLICY.preferredRegions);
@@ -43,6 +49,14 @@ export class LiveFilterApp {
     this.cache = new ProfileCache();
     this.fetcher = customFetcher || new ProfileFetcher();
     this.calibrationGate = calibrationGate || new GenderCalibrationGate();
+
+    this.breaker =
+      customBreaker ||
+      new CircuitBreaker({
+        onStateChange: () => this.updateStats(),
+      });
+
+    this.scheduler = new ViewportScheduler(this.breaker);
 
     this.ui = new FilterUI(
       {
@@ -70,15 +84,18 @@ export class LiveFilterApp {
 
   destroy(): void {
     this.observer.stop();
+    this.scheduler.destroy();
     this.cards.clear();
     this.factsMap.clear();
-    this.enrichmentQueue = [];
   }
 
   private handleCardDiscovered(cardElement: HTMLElement): void {
     if (this.cards.has(cardElement)) return;
     const info = extractCardInfo(cardElement);
     this.cards.set(cardElement, info);
+
+    // 视口观察器挂载
+    this.scheduler.observeCard(cardElement);
 
     // 1. 内容子串匹配
     this.evaluateContentMatch(info);
@@ -92,53 +109,52 @@ export class LiveFilterApp {
       // 检查缓存
       const cached = this.cache.get(info.userId);
       if (cached) {
-        // 根据当前校准门禁刷新 gender 归一化
         cached.gender = this.calibrationGate.normalize(cached.rawGender);
         this.factsMap.set(info.userId, cached);
         this.applyCardEvaluation(info, cached);
       } else {
-        // 加入调度队列（保守并发 <= 1）
-        if (!this.enrichmentQueue.includes(info.userId)) {
-          this.enrichmentQueue.push(info.userId);
-          this.processQueue();
-        }
+        // 加入视口感知调度器排队
+        this.enqueueEnrichment(info.userId, cardElement);
       }
     }
 
     this.updateStats();
   }
 
-  private async processQueue(): Promise<void> {
-    if (this.isEnriching || this.enrichmentQueue.length === 0) {
-      return;
-    }
+  private enqueueEnrichment(userId: string, cardElement: HTMLElement): void {
+    this.scheduler.enqueue({
+      userId,
+      cardElement,
+      priority: this.scheduler.getCardPriority(cardElement),
+      execute: async () => {
+        try {
+          const facts = await this.fetcher.fetchProfileFacts(userId);
+          facts.gender = this.calibrationGate.normalize(facts.rawGender);
 
-    this.isEnriching = true;
-    const userId = this.enrichmentQueue.shift()!;
+          this.cache.set(userId, facts);
+          this.factsMap.set(userId, facts);
 
-    try {
-      const facts = await this.fetcher.fetchProfileFacts(userId);
-      // 应用校准门禁归一化
-      facts.gender = this.calibrationGate.normalize(facts.rawGender);
+          // 重新评估并呈现该 userId 的所有卡片
+          for (const info of this.cards.values()) {
+            if (info.userId === userId) {
+              this.applyCardEvaluation(info, facts);
+            }
+          }
+        } catch (err: unknown) {
+          const isRateLimited = (err as { isRateLimited?: boolean })?.isRateLimited;
+          const isVerification = (err as { isVerification?: boolean })?.isVerification;
 
-      this.cache.set(userId, facts);
-      this.factsMap.set(userId, facts);
-
-      // 重新评估所有该 userId 的卡片
-      for (const info of this.cards.values()) {
-        if (info.userId === userId) {
-          this.applyCardEvaluation(info, facts);
+          if (isRateLimited || isVerification) {
+            // 遇到 429 或验证码立即熔断暂停
+            this.breaker.trip(isRateLimited ? 'HTTP 429 限流' : '出现验证码重定向');
+          } else {
+            console.warn(`[xhs-live-filter] Enrich user ${userId} failed (ordinary):`, err);
+          }
+        } finally {
+          this.updateStats();
         }
-      }
-    } catch (err) {
-      console.warn(`[xhs-live-filter] Enrich user ${userId} failed:`, err);
-    } finally {
-      this.isEnriching = false;
-      this.updateStats();
-      if (this.enrichmentQueue.length > 0) {
-        this.processQueue();
-      }
-    }
+      },
+    });
   }
 
   private handleKeywordChange(keyword: string): void {
@@ -153,23 +169,56 @@ export class LiveFilterApp {
     StorageAdapter.set('preferredRegions', this.policy.preferredRegions);
     StorageAdapter.set('hideExcluded', this.policy.hideExcluded);
 
-    // Policy 修改重新 Evaluate 已有 Facts，绝对不重新发起 Profile 网络请求
     this.refreshEvaluationsOnly();
   }
 
-  private handleManualRecover(): void {
-    // 供 Ticket #5 扩展恢复逻辑
+  /**
+   * 用户手动点击 [恢复] 按钮触发单次受控探针
+   * 严格执行 exactly one probe request，绝不启动自动循环
+   */
+  async handleManualRecover(): Promise<boolean> {
+    return this.breaker.manualProbe(async () => {
+      // 寻找视口内第一个未增强的 userId 作为探针目标
+      let targetUserId: string | null = null;
+      for (const info of this.cards.values()) {
+        if (info.userId && !this.factsMap.has(info.userId) && !this.cache.get(info.userId)) {
+          targetUserId = info.userId;
+          break;
+        }
+      }
+      if (!targetUserId) {
+        // 如果没有未增强的卡片，直接恢复为 RUNNING
+        return true;
+      }
+
+      try {
+        const facts = await this.fetcher.fetchProfileFacts(targetUserId);
+        facts.gender = this.calibrationGate.normalize(facts.rawGender);
+        this.cache.set(targetUserId, facts);
+        this.factsMap.set(targetUserId, facts);
+
+        for (const info of this.cards.values()) {
+          if (info.userId === targetUserId) {
+            this.applyCardEvaluation(info, facts);
+          }
+        }
+        return true;
+      } catch (err: unknown) {
+        const isRateLimited = (err as { isRateLimited?: boolean })?.isRateLimited;
+        const isVerification = (err as { isVerification?: boolean })?.isVerification;
+        if (isRateLimited || isVerification) {
+          return false;
+        }
+        // 普通错误不阻止恢复
+        return true;
+      }
+    });
   }
 
-  /**
-   * 应用平台公开核验的映射证据进行校准
-   * 重新计算已有 Facts，绝不重新拉取网络请求
-   */
   calibrateGender(mapping: Record<string | number, NormalizedGender>): void {
     this.calibrationGate.calibrate(mapping);
     this.ui.setCalibrationStatus(this.calibrationGate.getStatus());
 
-    // 重新归一化所有已知 facts 的 gender
     for (const facts of this.factsMap.values()) {
       facts.gender = this.calibrationGate.normalize(facts.rawGender);
     }
@@ -196,7 +245,9 @@ export class LiveFilterApp {
 
   private refreshEvaluationsOnly(): void {
     for (const info of this.cards.values()) {
-      const facts = info.userId ? this.factsMap.get(info.userId) || this.cache.get(info.userId) || createUnknownFacts(info.userId) : createUnknownFacts();
+      const facts = info.userId
+        ? this.factsMap.get(info.userId) || this.cache.get(info.userId) || createUnknownFacts(info.userId)
+        : createUnknownFacts();
       this.applyCardEvaluation(info, facts);
     }
     this.updateStats();
@@ -217,7 +268,9 @@ export class LiveFilterApp {
       if (matchContent(this.policy.contentKeyword, info.title, info.nickname)) {
         matchedCount++;
       }
-      const facts = info.userId ? this.factsMap.get(info.userId) || this.cache.get(info.userId) || createUnknownFacts(info.userId) : createUnknownFacts();
+      const facts = info.userId
+        ? this.factsMap.get(info.userId) || this.cache.get(info.userId) || createUnknownFacts(info.userId)
+        : createUnknownFacts();
       const evalRes = evaluate(facts, this.policy);
       if (evalRes.status === 'TARGET') {
         targetCount++;
@@ -234,11 +287,12 @@ export class LiveFilterApp {
       targetCards: targetCount,
       candidateCards: candidateCount,
       excludedCards: excludedCount,
+      isPaused: this.breaker.isPaused(),
     };
     this.ui.updateStats(stats);
   }
 
-  // 供测试使用的接口
+  // 供测试与检查的接口
   getDiscoveredCardsCount(): number {
     return this.cards.size;
   }
@@ -261,6 +315,14 @@ export class LiveFilterApp {
 
   getCalibrationGate(): GenderCalibrationGate {
     return this.calibrationGate;
+  }
+
+  getBreaker(): CircuitBreaker {
+    return this.breaker;
+  }
+
+  getScheduler(): ViewportScheduler {
+    return this.scheduler;
   }
 
   setPolicy(policy: Partial<V01Policy>): void {

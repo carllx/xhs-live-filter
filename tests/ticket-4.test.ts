@@ -55,7 +55,7 @@ describe('Ticket #4: Gender Calibration Gate & Configurable Qualification', () =
     app = new LiveFilterApp(mockFetcher);
     app.start(fixture);
 
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 250));
 
     expect(app.getCalibrationGate().getStatus()).toBe('UNCALIBRATED');
 
@@ -81,7 +81,7 @@ describe('Ticket #4: Gender Calibration Gate & Configurable Qualification', () =
 
     app = new LiveFilterApp(mockFetcher);
     app.start(fixture);
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 300));
 
     // 初始 policy: allowedGenders = ['female', 'unknown']
     // 应用校准证据：1 为 female，2 为 male
@@ -121,7 +121,7 @@ describe('Ticket #4: Gender Calibration Gate & Configurable Qualification', () =
     const mockFetcher = new ProfileFetcher(fetchFn);
     app = new LiveFilterApp(mockFetcher);
     app.start(fixture);
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 250));
 
     // 记录初始网络请求次数（针对 3 个有 userId 的卡片各 1 次，共 3 次）
     const initialCallCount = fetchFn.mock.calls.length;
