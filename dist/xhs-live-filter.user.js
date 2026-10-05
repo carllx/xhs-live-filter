@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xhs-live-filter
 // @namespace    https://github.com/carllx/xhs-live-filter
-// @version      0.1.0
+// @version      0.1.1
 // @description  小红书直播广场智能过滤器
 // @author       carllx
 // @match        https://www.xiaohongshu.com/*
@@ -201,7 +201,7 @@
      * 扫描指定子树下的潜在直播卡片
      */
     scan(root) {
-      const selector = '.live-card-item, [class*="live-card"], a[href*="/live/"]';
+      const selector = '.live-card-item, [class*="live-card"], [class*="live-item"], [class*="feed-card"], .card-item, a[href*="/live/"]';
       if (this.isCardElement(root) && !this.knownCards.has(root)) {
         this.knownCards.add(root);
         this.callbacks.onCardDiscovered(root);
@@ -216,10 +216,11 @@
       }
     }
     isCardElement(el) {
-      return el.classList.contains("live-card-item") || el.getAttribute("class")?.includes("live-card") || false;
+      const className = el.getAttribute("class") || "";
+      return el.classList.contains("live-card-item") || el.classList.contains("card-item") || className.includes("live-card") || className.includes("live-item") || className.includes("feed-card");
     }
     resolveCardContainer(el) {
-      const container = el.closest('.live-card-item, [class*="live-card"], [class*="live-item"], [class*="feed-card"], .card-item, section, article');
+      const container = el.closest('.live-card-item, [class*="live-card"], [class*="live-item"], [class*="feed-card"], .card-item');
       if (container instanceof HTMLElement) {
         return container;
       }

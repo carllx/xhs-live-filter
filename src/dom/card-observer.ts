@@ -52,8 +52,8 @@ export class CardObserver {
    * 扫描指定子树下的潜在直播卡片
    */
   scan(root: HTMLElement): void {
-    // 匹配可能的直播卡片选择器
-    const selector = '.live-card-item, [class*="live-card"], a[href*="/live/"]';
+    // 匹配卡片容器选择器与 live 链接
+    const selector = '.live-card-item, [class*="live-card"], [class*="live-item"], [class*="feed-card"], .card-item, a[href*="/live/"]';
     
     // 检查自身是否为卡片
     if (this.isCardElement(root) && !this.knownCards.has(root)) {
@@ -72,14 +72,17 @@ export class CardObserver {
   }
 
   private isCardElement(el: HTMLElement): boolean {
+    const className = el.getAttribute('class') || '';
     return el.classList.contains('live-card-item') ||
-           el.getAttribute('class')?.includes('live-card') ||
-           false;
+           el.classList.contains('card-item') ||
+           className.includes('live-card') ||
+           className.includes('live-item') ||
+           className.includes('feed-card');
   }
 
   private resolveCardContainer(el: HTMLElement): HTMLElement {
     // 优先往上寻找直播卡片最外层容器
-    const container = el.closest('.live-card-item, [class*="live-card"], [class*="live-item"], [class*="feed-card"], .card-item, section, article');
+    const container = el.closest('.live-card-item, [class*="live-card"], [class*="live-item"], [class*="feed-card"], .card-item');
     if (container instanceof HTMLElement) {
       return container;
     }
