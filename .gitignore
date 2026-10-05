@@ -1,4 +1,5 @@
 node_modules/
-dist/
+dist/*
+!dist/xhs-live-filter.user.js
 *.log
 .DS_Store

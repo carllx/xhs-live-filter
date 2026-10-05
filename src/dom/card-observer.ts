@@ -78,12 +78,12 @@ export class CardObserver {
   }
 
   private resolveCardContainer(el: HTMLElement): HTMLElement {
-    // 往上寻找卡片最外层容器
-    const container = el.closest('.live-card-item, [class*="live-card"]');
+    // 优先往上寻找直播卡片最外层容器
+    const container = el.closest('.live-card-item, [class*="live-card"], [class*="live-item"], [class*="feed-card"], .card-item, section, article');
     if (container instanceof HTMLElement) {
       return container;
     }
-    // 如果没有包裹层，直接使用当前元素或其父级
+    // 如果没有包裹层，直接使用当前元素
     return el;
   }
 }
