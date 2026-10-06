@@ -215,6 +215,58 @@ describe('v0.1.3 Squarefeed Interception & Anchor Identity Binding', () => {
     expect(store.getIdentity('222')?.userId).toBe('u_222');
   });
 
+  // 8b. raw snake_case schema from network response (pre-transformation)
+  it('8b. Correctly parses raw snake_case API payload fields (t_room_info, t_live_host_info)', () => {
+    const rawSnakePayload = {
+      code: 0,
+      success: true,
+      data: {
+        feeds: [
+          {
+            live: {
+              t_room_info: {
+                room_id: 570484055475371367,
+                room_id_str: '570484055475371367',
+                name: '落魄留学生',
+              },
+              t_live_host_info: {
+                user_id: '62b952a2000000001b029272',
+                nickname: 'Cathy徐可爱',
+              },
+            },
+          },
+          {
+            live: {
+              room_info: {
+                room_id: '987654321',
+                title: '备选直播',
+              },
+              host_info: {
+                anchor_id: 'host_987',
+                nick_name: '备选主播',
+              },
+            },
+          },
+        ],
+      },
+    };
+
+    processSquarefeedPayload(rawSnakePayload, store);
+    expect(store.getIdentityMapSize()).toBe(2);
+    expect(store.getIdentity('570484055475371367')).toEqual({
+      liveId: '570484055475371367',
+      userId: '62b952a2000000001b029272',
+      nickname: 'Cathy徐可爱',
+      title: '落魄留学生',
+    });
+    expect(store.getIdentity('987654321')).toEqual({
+      liveId: '987654321',
+      userId: 'host_987',
+      nickname: '备选主播',
+      title: '备选直播',
+    });
+  });
+
   // 9. card extracts /livestream/{id}
   it('9. Card extractor extracts liveId from /livestream/{liveId}', () => {
     const card = document.createElement('div');

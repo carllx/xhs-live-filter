@@ -32,6 +32,29 @@ export function isSquarefeedUrl(rawUrl: string): boolean {
 /**
  * 安全解析 squarefeed 响应 payload 并写入 store
  */
+let firstFeedSchemaLogged = false;
+
+/**
+ * 生成安全的结构化 schema 诊断对象（仅输出 keys 和类型，不输出敏感字符串值）
+ */
+function buildSafeStructuralSchema(obj: unknown, depth = 0, maxDepth = 3): unknown {
+  if (depth > maxDepth || !obj || typeof obj !== 'object') {
+    return typeof obj;
+  }
+  if (Array.isArray(obj)) {
+    return [obj.length > 0 ? buildSafeStructuralSchema(obj[0], depth + 1, maxDepth) : 'empty_array'];
+  }
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (v && typeof v === 'object') {
+      result[k] = buildSafeStructuralSchema(v, depth + 1, maxDepth);
+    } else {
+      result[k] = typeof v;
+    }
+  }
+  return result;
+}
+
 export function processSquarefeedPayload(payload: unknown, store: FeedIdentityStore = FeedIdentityStore.getInstance()): void {
   if (!payload || typeof payload !== 'object') return;
 
@@ -45,25 +68,76 @@ export function processSquarefeedPayload(payload: unknown, store: FeedIdentitySt
 
   if (!feeds || feeds.length === 0) return;
 
+  // 生产环境诊断：仅在首次捕获时打印首条 feed 的受限安全结构，协助现场定位
+  if (!firstFeedSchemaLogged && feeds[0]) {
+    firstFeedSchemaLogged = true;
+    try {
+      const safeSchema = buildSafeStructuralSchema(feeds[0]);
+      console.log('[xhs-live-filter] squarefeed first-feed schema:', JSON.stringify(safeSchema));
+    } catch {
+      // fail-soft
+    }
+  }
+
   store.incrementCapturedCount(feeds.length);
   let parsedCount = 0;
 
   for (const item of feeds) {
     if (!item || typeof item !== 'object') continue;
-    const feed = item as {
-      live?: {
-        tRoomInfo?: { roomIdStr?: string | number; roomId?: string | number; name?: string };
-        tLiveHostInfo?: { userId?: string | number; nickname?: string };
-      };
-    };
+    const rawItem = item as Record<string, any>;
+    const live = rawItem.live ?? rawItem;
 
-    const roomInfo = feed.live?.tRoomInfo;
-    const hostInfo = feed.live?.tLiveHostInfo;
+    // 适配真实 raw 响应（snake_case）与经过 axios 拦截器转换后的（camelCase）
+    const roomInfo =
+      live.t_room_info ??
+      live.tRoomInfo ??
+      live.room_info ??
+      live.roomInfo;
 
-    const liveId = (roomInfo?.roomIdStr ?? roomInfo?.roomId ?? '').toString().trim();
-    const userId = (hostInfo?.userId ?? '').toString().trim();
-    const nickname = (hostInfo?.nickname ?? '').toString().trim();
-    const title = (roomInfo?.name ?? '').toString().trim();
+    const hostInfo =
+      live.t_live_host_info ??
+      live.tLiveHostInfo ??
+      live.host_info ??
+      live.hostInfo ??
+      live.anchor_info ??
+      live.anchorInfo;
+
+    const liveId = (
+      roomInfo?.room_id_str ??
+      roomInfo?.roomIdStr ??
+      roomInfo?.room_id ??
+      roomInfo?.roomId ??
+      live.room_id_str ??
+      live.roomIdStr ??
+      live.room_id ??
+      live.roomId ??
+      ''
+    ).toString().trim();
+
+    const userId = (
+      hostInfo?.user_id ??
+      hostInfo?.userId ??
+      hostInfo?.anchor_id ??
+      hostInfo?.anchorId ??
+      live.user_id ??
+      live.userId ??
+      ''
+    ).toString().trim();
+
+    const nickname = (
+      hostInfo?.nickname ??
+      hostInfo?.nick_name ??
+      hostInfo?.name ??
+      ''
+    ).toString().trim();
+
+    const title = (
+      roomInfo?.name ??
+      roomInfo?.title ??
+      live.name ??
+      live.title ??
+      ''
+    ).toString().trim();
 
     if (liveId && userId) {
       store.addIdentity({

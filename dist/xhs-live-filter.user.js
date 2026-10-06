@@ -1371,22 +1371,49 @@
       return rawUrl.includes(SQUAREFEED_HOST) && rawUrl.includes(SQUAREFEED_PATH);
     }
   }
+  var firstFeedSchemaLogged = false;
+  function buildSafeStructuralSchema(obj, depth = 0, maxDepth = 3) {
+    if (depth > maxDepth || !obj || typeof obj !== "object") {
+      return typeof obj;
+    }
+    if (Array.isArray(obj)) {
+      return [obj.length > 0 ? buildSafeStructuralSchema(obj[0], depth + 1, maxDepth) : "empty_array"];
+    }
+    const result = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (v && typeof v === "object") {
+        result[k] = buildSafeStructuralSchema(v, depth + 1, maxDepth);
+      } else {
+        result[k] = typeof v;
+      }
+    }
+    return result;
+  }
   function processSquarefeedPayload(payload, store = FeedIdentityStore.getInstance()) {
     if (!payload || typeof payload !== "object") return;
     const dataObj = payload;
     const feeds = Array.isArray(dataObj.data?.feeds) ? dataObj.data.feeds : Array.isArray(dataObj.feeds) ? dataObj.feeds : null;
     if (!feeds || feeds.length === 0) return;
+    if (!firstFeedSchemaLogged && feeds[0]) {
+      firstFeedSchemaLogged = true;
+      try {
+        const safeSchema = buildSafeStructuralSchema(feeds[0]);
+        console.log("[xhs-live-filter] squarefeed first-feed schema:", JSON.stringify(safeSchema));
+      } catch {
+      }
+    }
     store.incrementCapturedCount(feeds.length);
     let parsedCount = 0;
     for (const item of feeds) {
       if (!item || typeof item !== "object") continue;
-      const feed = item;
-      const roomInfo = feed.live?.tRoomInfo;
-      const hostInfo = feed.live?.tLiveHostInfo;
-      const liveId = (roomInfo?.roomIdStr ?? roomInfo?.roomId ?? "").toString().trim();
-      const userId = (hostInfo?.userId ?? "").toString().trim();
-      const nickname = (hostInfo?.nickname ?? "").toString().trim();
-      const title = (roomInfo?.name ?? "").toString().trim();
+      const rawItem = item;
+      const live = rawItem.live ?? rawItem;
+      const roomInfo = live.t_room_info ?? live.tRoomInfo ?? live.room_info ?? live.roomInfo;
+      const hostInfo = live.t_live_host_info ?? live.tLiveHostInfo ?? live.host_info ?? live.hostInfo ?? live.anchor_info ?? live.anchorInfo;
+      const liveId = (roomInfo?.room_id_str ?? roomInfo?.roomIdStr ?? roomInfo?.room_id ?? roomInfo?.roomId ?? live.room_id_str ?? live.roomIdStr ?? live.room_id ?? live.roomId ?? "").toString().trim();
+      const userId = (hostInfo?.user_id ?? hostInfo?.userId ?? hostInfo?.anchor_id ?? hostInfo?.anchorId ?? live.user_id ?? live.userId ?? "").toString().trim();
+      const nickname = (hostInfo?.nickname ?? hostInfo?.nick_name ?? hostInfo?.name ?? "").toString().trim();
+      const title = (roomInfo?.name ?? roomInfo?.title ?? live.name ?? live.title ?? "").toString().trim();
       if (liveId && userId) {
         store.addIdentity({
           liveId,
