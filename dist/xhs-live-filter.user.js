@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xhs-live-filter
 // @namespace    https://github.com/carllx/xhs-live-filter
-// @version      0.1.1
+// @version      0.1.2
 // @description  小红书直播广场智能过滤器
 // @author       carllx
 // @match        https://www.xiaohongshu.com/*
@@ -27,27 +27,49 @@
     const targetNickname = (nickname || "").toLowerCase();
     return targetTitle.includes(normalizedKeyword) || targetNickname.includes(normalizedKeyword);
   }
-  function evaluate(facts, policy) {
-    if (facts.gender !== "unknown" && !policy.allowedGenders.includes(facts.gender)) {
+  function evaluate(facts, policy, isCalibrated = false) {
+    let genderMatch = true;
+    if (!isCalibrated) {
+      genderMatch = true;
+    } else {
+      if (facts.gender === "unknown") {
+        genderMatch = policy.keepUnknownGender;
+      } else {
+        genderMatch = policy.allowedGenders.includes(facts.gender);
+      }
+    }
+    let regionMatch = true;
+    const hasRegionFilter = policy.preferredRegions.length > 0;
+    if (hasRegionFilter) {
+      if (facts.region === "unknown") {
+        regionMatch = policy.keepUnknownRegion;
+      } else {
+        regionMatch = policy.preferredRegions.includes(facts.region);
+      }
+    }
+    if (!genderMatch || !regionMatch) {
       return {
         status: "EXCLUDED",
         regionPriority: 0,
-        reason: `\u6027\u522B\u4E0D\u5339\u914D (${facts.gender})`
+        genderMatch,
+        regionMatch,
+        reason: !genderMatch ? `\u6027\u522B\u4E0D\u7B26 (${facts.gender})` : `\u5C5E\u5730\u4E0D\u7B26 (${facts.region})`
       };
     }
-    let regionPriority = 0;
-    if (facts.region !== "unknown" && policy.preferredRegions.includes(facts.region)) {
-      regionPriority = 1;
-    }
-    if (regionPriority > 0) {
+    const isTargetRegion = facts.region !== "unknown" && policy.preferredRegions.includes(facts.region);
+    if (isTargetRegion) {
       return {
         status: "TARGET",
-        regionPriority
+        regionPriority: 1,
+        genderMatch,
+        regionMatch
       };
     }
     return {
       status: "CANDIDATE",
-      regionPriority: 0
+      regionPriority: 0,
+      genderMatch,
+      regionMatch
     };
   }
 
@@ -113,8 +135,10 @@
   var DEFAULT_POLICY = {
     contentKeyword: "",
     preferredRegions: ["\u5E7F\u4E1C"],
-    allowedGenders: ["female", "unknown"],
-    hideExcluded: false
+    keepUnknownRegion: true,
+    allowedGenders: ["female"],
+    keepUnknownGender: true,
+    hideExcluded: true
   };
 
   // src/dom/card-extractor.ts
@@ -231,7 +255,36 @@
   // src/dom/card-presenter.ts
   var CardPresenter = class {
     /**
-     * 应用关键词匹配结果展示
+     * 应用综合过滤结果（内容匹配 + 资格状态）
+     * @param cardElement 卡片原生容器
+     * @param contentMatched 关键词内容是否匹配
+     * @param evalResult 领域评估结果
+     * @param facts 主播事实
+     */
+    static applyPresentation(cardElement, contentMatched, evalResult, facts) {
+      const isExcluded = evalResult.status === "EXCLUDED";
+      const isVisible = contentMatched && !isExcluded;
+      if (!isVisible) {
+        cardElement.style.visibility = "hidden";
+        cardElement.style.pointerEvents = "none";
+        cardElement.setAttribute("data-xhs-filter-hidden", "true");
+        this.removeBadge(cardElement);
+        return;
+      }
+      cardElement.style.visibility = "visible";
+      cardElement.style.pointerEvents = "auto";
+      cardElement.style.opacity = "1";
+      cardElement.style.filter = "none";
+      cardElement.removeAttribute("data-xhs-filter-hidden");
+      cardElement.removeAttribute("data-xhs-filter-excluded");
+      if (evalResult.status === "TARGET" && facts.region !== "unknown") {
+        this.setBadge(cardElement, facts.region, "#52c41a");
+      } else {
+        this.removeBadge(cardElement);
+      }
+    }
+    /**
+     * 兼容旧接口：仅内容匹配
      */
     static applyContentMatch(cardElement, matched) {
       if (matched) {
@@ -245,58 +298,33 @@
       }
     }
     /**
-     * 应用领域评估结果（TARGET / CANDIDATE / EXCLUDED）
-     * @param cardElement 卡片 DOM
-     * @param evalResult 评估结果
-     * @param facts 主播事实
-     * @param hideExcluded 是否主动隐藏被排除卡片
+     * 移除卡片徽标
      */
-    static applyEvaluation(cardElement, evalResult, facts, hideExcluded = false) {
-      if (evalResult.status === "EXCLUDED") {
-        if (hideExcluded) {
-          cardElement.style.visibility = "hidden";
-          cardElement.style.pointerEvents = "none";
-          cardElement.setAttribute("data-xhs-filter-excluded", "hidden");
-        } else {
-          cardElement.style.visibility = "visible";
-          cardElement.style.pointerEvents = "auto";
-          cardElement.style.opacity = "0.25";
-          cardElement.style.filter = "grayscale(1)";
-          cardElement.setAttribute("data-xhs-filter-excluded", "dimmed");
-        }
-        this.setBadge(cardElement, "\u26D4 \u5DF2\u6392\u9664", "#8c8c8c");
-        return;
-      }
-      cardElement.style.opacity = "1";
-      cardElement.style.filter = "none";
-      cardElement.removeAttribute("data-xhs-filter-excluded");
-      if (evalResult.status === "TARGET") {
-        const regionLabel = facts.region !== "unknown" ? `\u{1F3AF} ${facts.region}` : "\u{1F3AF} \u504F\u597D";
-        this.setBadge(cardElement, regionLabel, "#52c41a");
-      } else {
-        const regionLabel = facts.region !== "unknown" ? `\u26AA ${facts.region}` : "\u26AA \u666E\u901A";
-        this.setBadge(cardElement, regionLabel, "#1890ff");
+    static removeBadge(cardElement) {
+      const badge = cardElement.querySelector(".xhs-filter-badge");
+      if (badge) {
+        badge.remove();
       }
     }
     /**
-     * 附加或更新卡片徽标（Badge）
+     * 附加或更新极小事实徽标（Badge）
      */
-    static setBadge(cardElement, text, color = "#ff2442") {
+    static setBadge(cardElement, text, color = "#52c41a") {
       let badge = cardElement.querySelector(".xhs-filter-badge");
       if (!badge) {
         badge = document.createElement("div");
         badge.className = "xhs-filter-badge";
         badge.style.position = "absolute";
-        badge.style.top = "8px";
-        badge.style.left = "8px";
-        badge.style.padding = "2px 8px";
-        badge.style.borderRadius = "4px";
-        badge.style.fontSize = "11px";
-        badge.style.fontWeight = "bold";
+        badge.style.top = "6px";
+        badge.style.left = "6px";
+        badge.style.padding = "1px 5px";
+        badge.style.borderRadius = "3px";
+        badge.style.fontSize = "10px";
+        badge.style.fontWeight = "600";
         badge.style.color = "#fff";
         badge.style.zIndex = "10";
         badge.style.pointerEvents = "none";
-        badge.style.boxShadow = "0 2px 4px rgba(0,0,0,0.2)";
+        badge.style.boxShadow = "0 1px 3px rgba(0,0,0,0.2)";
         const position = window.getComputedStyle(cardElement).position;
         if (position === "static") {
           cardElement.style.position = "relative";
@@ -719,10 +747,11 @@
     // Policy UI elements
     femaleCheckbox;
     maleCheckbox;
-    unknownGenderCheckbox;
+    keepUnknownGenderCheckbox;
     regionInput;
-    hideExcludedCheckbox;
-    calibrationBadgeEl;
+    keepUnknownRegionCheckbox;
+    genderNoticeEl;
+    calibrationStatus = "UNCALIBRATED";
     constructor(events, initialPolicy) {
       this.events = events;
       this.container = document.createElement("div");
@@ -754,13 +783,13 @@
       this.capsuleEl.innerHTML = `
       <span class="capsule-icon" style="font-size: 14px;">\u{1F3AF}</span>
       <span class="capsule-title" style="font-weight: 600;">\u76F4\u64AD\u8FC7\u6EE4</span>
-      <span class="capsule-count" style="font-size: 11px; opacity: 0.9; margin-left: 2px;">(0/0)</span>
+      <span class="capsule-count" style="font-size: 11px; opacity: 0.9; margin-left: 2px;">(\u663E\u793A 0/0)</span>
     `;
       this.panelEl = document.createElement("div");
       this.panelEl.className = "xhs-filter-panel";
       this.panelEl.style.cssText = `
       display: none;
-      width: 300px;
+      width: 310px;
       background: #ffffff;
       border-radius: 12px;
       box-shadow: 0 8px 24px rgba(0,0,0,0.15);
@@ -775,7 +804,7 @@
         <button class="panel-close-btn" style="background: none; border: none; font-size: 16px; cursor: pointer; color: #888;">\u2715</button>
       </div>
 
-      <!-- \u5173\u952E\u8BCD\u7B5B\u9009 -->
+      <!-- \u5185\u5BB9\u5173\u952E\u8BCD -->
       <div style="margin-bottom: 12px;">
         <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px; color: #555;">\u5185\u5BB9\u5173\u952E\u8BCD</label>
         <div style="display: flex; gap: 6px;">
@@ -784,49 +813,53 @@
         </div>
       </div>
 
-      <!-- \u6027\u522B\u7B5B\u9009 (Ticket #4) -->
+      <!-- \u5C5E\u5730\u7B5B\u9009 (\u771F\u5B9E\u786C\u7B5B\u9009) -->
       <div style="margin-bottom: 12px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-          <label style="font-weight: 600; font-size: 12px; color: #555;">\u5141\u8BB8\u6027\u522B</label>
-          <span class="calibration-badge" style="font-size: 10px; color: #fa8c16; background: #fff7e6; padding: 1px 6px; border-radius: 4px; border: 1px solid #ffd591;">\u95E8\u7981: UNCALIBRATED (Fail-Open)</span>
+          <label style="font-weight: 600; font-size: 12px; color: #555;">\u5C5E\u5730\u7B5B\u9009 (\u7559\u7A7A\u4E0D\u9650)</label>
         </div>
-        <div style="display: flex; gap: 12px; font-size: 12px; color: #444;">
-          <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
-            <input type="checkbox" class="gender-female" checked /> \u5973\u6027
+        <input type="text" class="region-input" value="\u5E7F\u4E1C" placeholder="\u5982\uFF1A\u5E7F\u4E1C, \u4E0A\u6D77 (\u9017\u53F7\u5206\u9694)" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; outline: none; margin-bottom: 6px;" />
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #666; cursor: pointer;">
+          <input type="checkbox" class="keep-unknown-region" checked />
+          <span>\u4FDD\u7559\u672A\u77E5\u5C5E\u5730\u7684\u4E3B\u64AD (Fail-Open)</span>
+        </label>
+      </div>
+
+      <!-- \u6027\u522B\u7B5B\u9009 (\u771F\u5B9E\u6027\u95E8\u7981) -->
+      <div style="margin-bottom: 12px; padding: 8px; background: #fafafa; border-radius: 6px; border: 1px solid #f0f0f0;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+          <label style="font-weight: 600; font-size: 12px; color: #555;">\u6027\u522B\u7B5B\u9009</label>
+          <span class="gender-notice" style="font-size: 10px; color: #fa8c16;">\u6682\u4E0D\u53EF\u7528 \xB7 \u672A\u6821\u51C6</span>
+        </div>
+        <div class="gender-controls-container" style="display: flex; gap: 12px; font-size: 12px; color: #444; margin-bottom: 6px;">
+          <label style="display: flex; align-items: center; gap: 4px; cursor: not-allowed; opacity: 0.6;">
+            <input type="checkbox" class="gender-female" disabled /> \u4EC5\u5973\u6027
           </label>
-          <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
-            <input type="checkbox" class="gender-male" /> \u7537\u6027
+          <label style="display: flex; align-items: center; gap: 4px; cursor: not-allowed; opacity: 0.6;">
+            <input type="checkbox" class="gender-male" disabled /> \u4EC5\u7537\u6027
           </label>
-          <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
-            <input type="checkbox" class="gender-unknown" checked /> \u672A\u77E5/\u672A\u6821\u51C6
-          </label>
+        </div>
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #666; cursor: not-allowed; opacity: 0.6;">
+          <input type="checkbox" class="keep-unknown-gender" checked disabled />
+          <span>\u4FDD\u7559\u672A\u77E5\u6027\u522B\u7684\u4E3B\u64AD</span>
+        </label>
+        <div class="gender-desc" style="font-size: 10px; color: #888; margin-top: 4px;">
+          \u5E73\u53F0\u5E95\u5C42\u6027\u522B\u4EE3\u7801\u5C1A\u672A\u5B8C\u6210\u6743\u5A01\u5BF9\u7167\uFF0C\u76EE\u524D\u5168\u91CF\u81EA\u52A8\u653E\u884C\u3002
         </div>
       </div>
 
-      <!-- \u504F\u597D\u5C5E\u5730 (Ticket #3/4) -->
-      <div style="margin-bottom: 12px;">
-        <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px; color: #555;">\u504F\u597D\u5C5E\u5730 (\u9017\u53F7\u5206\u9694)</label>
-        <input type="text" class="region-input" value="\u5E7F\u4E1C" placeholder="\u5982\uFF1A\u5E7F\u4E1C,\u4E0A\u6D77" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; outline: none;" />
-      </div>
-
-      <!-- \u5E74\u9F84 (\u7F6E\u7070\u4E0D\u53EF\u7528) -->
-      <div style="margin-bottom: 12px; opacity: 0.6;">
+      <!-- \u5E74\u9F84\u533A\u95F4 (\u7F6E\u7070\u4E0D\u53EF\u7528) -->
+      <div style="margin-bottom: 12px; opacity: 0.5;">
         <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px; color: #999;">\u5E74\u9F84\u533A\u95F4 (\u516C\u5F00\u6570\u636E\u4E0D\u53EF\u7528 \xB7 \u5DF2\u7981\u7528)</label>
         <input type="text" disabled value="\u4E0D\u9650 (Fail-Open)" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #eee; border-radius: 6px; font-size: 12px; background: #fafafa; color: #aaa; cursor: not-allowed;" />
       </div>
 
-      <!-- \u89C6\u56FE\u63A7\u5236\uFF1AhideExcluded (\u9ED8\u8BA4\u5173\u95ED) -->
-      <div style="margin-bottom: 12px; padding-top: 6px; border-top: 1px dashed #eee;">
-        <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #444; cursor: pointer;">
-          <input type="checkbox" class="hide-excluded-checkbox" />
-          <span>\u9690\u85CF\u5DF2\u6392\u9664\u4E3B\u64AD (\u9ED8\u8BA4\u4F4E\u900F\u660E\u5EA6\u4FDD\u7559)</span>
-        </label>
-      </div>
-
+      <!-- \u7EDF\u8BA1\u4FE1\u606F -->
       <div class="stats-section" style="padding: 8px; background: #f9f9f9; border-radius: 6px; font-size: 11px; color: #666; margin-bottom: 8px;">
-        \u7EDF\u8BA1: <span class="stats-text">0 \u5361\u7247</span>
+        <span class="stats-text">\u5F53\u524D\u663E\u793A 0 / 0 \u5F20\u5361\u7247</span>
       </div>
 
+      <!-- \u98CE\u63A7\u4FDD\u62A4\u8B66\u544A -->
       <div class="paused-warning" style="display: none; padding: 6px 8px; background: #fffbe6; border: 1px solid #ffe58f; border-radius: 6px; font-size: 11px; color: #d46b08; margin-bottom: 8px; justify-content: space-between; align-items: center;">
         <span>\u26A0\uFE0F \u5DF2\u6682\u505C \xB7 \u98CE\u63A7\u4FDD\u62A4</span>
         <button class="recover-btn" style="padding: 2px 8px; background: #fa8c16; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">\u6062\u590D</button>
@@ -841,10 +874,10 @@
       this.recoverBtn = this.panelEl.querySelector(".recover-btn");
       this.femaleCheckbox = this.panelEl.querySelector(".gender-female");
       this.maleCheckbox = this.panelEl.querySelector(".gender-male");
-      this.unknownGenderCheckbox = this.panelEl.querySelector(".gender-unknown");
+      this.keepUnknownGenderCheckbox = this.panelEl.querySelector(".keep-unknown-gender");
       this.regionInput = this.panelEl.querySelector(".region-input");
-      this.hideExcludedCheckbox = this.panelEl.querySelector(".hide-excluded-checkbox");
-      this.calibrationBadgeEl = this.panelEl.querySelector(".calibration-badge");
+      this.keepUnknownRegionCheckbox = this.panelEl.querySelector(".keep-unknown-region");
+      this.genderNoticeEl = this.panelEl.querySelector(".gender-notice");
       if (initialPolicy) {
         this.syncPolicyToUI(initialPolicy);
       }
@@ -870,42 +903,58 @@
         const allowedGenders = [];
         if (this.femaleCheckbox.checked) allowedGenders.push("female");
         if (this.maleCheckbox.checked) allowedGenders.push("male");
-        if (this.unknownGenderCheckbox.checked) allowedGenders.push("unknown");
         const regions = this.regionInput.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
-        const hideExcluded = this.hideExcludedCheckbox.checked;
+        const keepUnknownRegion = this.keepUnknownRegionCheckbox.checked;
+        const keepUnknownGender = this.keepUnknownGenderCheckbox.checked;
         if (this.events.onPolicyChange) {
           this.events.onPolicyChange({
             allowedGenders,
+            keepUnknownGender,
             preferredRegions: regions,
-            hideExcluded
+            keepUnknownRegion
           });
         }
       };
       this.femaleCheckbox.addEventListener("change", handlePolicyUpdate);
       this.maleCheckbox.addEventListener("change", handlePolicyUpdate);
-      this.unknownGenderCheckbox.addEventListener("change", handlePolicyUpdate);
+      this.keepUnknownGenderCheckbox.addEventListener("change", handlePolicyUpdate);
       this.regionInput.addEventListener("input", handlePolicyUpdate);
-      this.hideExcludedCheckbox.addEventListener("change", handlePolicyUpdate);
+      this.keepUnknownRegionCheckbox.addEventListener("change", handlePolicyUpdate);
     }
     syncPolicyToUI(policy) {
       this.keywordInput.value = policy.contentKeyword;
       this.femaleCheckbox.checked = policy.allowedGenders.includes("female");
       this.maleCheckbox.checked = policy.allowedGenders.includes("male");
-      this.unknownGenderCheckbox.checked = policy.allowedGenders.includes("unknown");
+      this.keepUnknownGenderCheckbox.checked = policy.keepUnknownGender;
       this.regionInput.value = policy.preferredRegions.join(", ");
-      this.hideExcludedCheckbox.checked = policy.hideExcluded;
+      this.keepUnknownRegionCheckbox.checked = policy.keepUnknownRegion;
     }
     setCalibrationStatus(status) {
+      this.calibrationStatus = status;
+      const labels = this.panelEl.querySelectorAll(".gender-controls-container label, label:has(.keep-unknown-gender)");
+      const desc = this.panelEl.querySelector(".gender-desc");
       if (status === "CALIBRATED") {
-        this.calibrationBadgeEl.textContent = "\u95E8\u7981: CALIBRATED";
-        this.calibrationBadgeEl.style.color = "#52c41a";
-        this.calibrationBadgeEl.style.background = "#f6ffed";
-        this.calibrationBadgeEl.style.borderColor = "#b7eb8f";
+        this.genderNoticeEl.textContent = "\u5DF2\u542F\u7528";
+        this.genderNoticeEl.style.color = "#52c41a";
+        this.femaleCheckbox.disabled = false;
+        this.maleCheckbox.disabled = false;
+        this.keepUnknownGenderCheckbox.disabled = false;
+        labels.forEach((l) => {
+          l.style.opacity = "1";
+          l.style.cursor = "pointer";
+        });
+        desc.textContent = "\u5DF2\u5E94\u7528\u53EF\u9760\u5E73\u53F0\u5BF9\u7167\u6807\u51C6\uFF0C\u53EF\u7CBE\u786E\u7B5B\u9009\u3002";
       } else {
-        this.calibrationBadgeEl.textContent = "\u95E8\u7981: UNCALIBRATED (Fail-Open)";
-        this.calibrationBadgeEl.style.color = "#fa8c16";
-        this.calibrationBadgeEl.style.background = "#fff7e6";
-        this.calibrationBadgeEl.style.borderColor = "#ffd591";
+        this.genderNoticeEl.textContent = "\u6682\u4E0D\u53EF\u7528 \xB7 \u672A\u6821\u51C6";
+        this.genderNoticeEl.style.color = "#fa8c16";
+        this.femaleCheckbox.disabled = true;
+        this.maleCheckbox.disabled = true;
+        this.keepUnknownGenderCheckbox.disabled = true;
+        labels.forEach((l) => {
+          l.style.opacity = "0.6";
+          l.style.cursor = "not-allowed";
+        });
+        desc.textContent = "\u5E73\u53F0\u5E95\u5C42\u6027\u522B\u4EE3\u7801\u5C1A\u672A\u5B8C\u6210\u6743\u5A01\u5BF9\u7167\uFF0C\u76EE\u524D\u5168\u91CF\u81EA\u52A8\u653E\u884C\u3002";
       }
     }
     mount(root = document.body) {
@@ -929,14 +978,14 @@
     updateStats(stats) {
       const countEl = this.capsuleEl.querySelector(".capsule-count");
       if (countEl) {
-        countEl.textContent = `(${stats.matchedCards}/${stats.totalCards})`;
+        countEl.textContent = `(${stats.visibleCards}/${stats.totalCards})`;
       }
-      let statsDetail = `\u53D1\u73B0 ${stats.totalCards} \u5F20\u5361\u7247\uFF0C\u5339\u914D ${stats.matchedCards} \u5F20`;
-      if (stats.targetCards !== void 0 && stats.candidateCards !== void 0) {
-        statsDetail += ` (\u{1F3AF} ${stats.targetCards} \u4F18\u5148 | \u26AA ${stats.candidateCards} \u666E\u901A)`;
+      let statsDetail = `\u663E\u793A ${stats.visibleCards} / ${stats.totalCards} \u5F20\u5361\u7247`;
+      if (stats.filteredCards > 0) {
+        statsDetail += `\uFF08\u8FC7\u6EE4\u6389 ${stats.filteredCards} \u5F20\uFF09`;
       }
-      if (stats.excludedCards !== void 0 && stats.excludedCards > 0) {
-        statsDetail += ` [\u26D4 \u6392\u9664 ${stats.excludedCards}]`;
+      if (this.calibrationStatus === "UNCALIBRATED") {
+        statsDetail += ` \xB7 \u6027\u522B\u7B5B\u9009\u672A\u751F\u6548 (Fail-Open)`;
       }
       this.statsTextEl.textContent = statsDetail;
       const pausedEl = this.panelEl.querySelector(".paused-warning");
@@ -977,13 +1026,16 @@
     constructor(customFetcher, calibrationGate, customBreaker) {
       const savedKeyword = StorageAdapter.get("contentKeyword", "");
       const savedRegions = StorageAdapter.get("preferredRegions", DEFAULT_POLICY.preferredRegions);
+      const savedKeepUnknownRegion = StorageAdapter.get("keepUnknownRegion", DEFAULT_POLICY.keepUnknownRegion);
       const savedGenders = StorageAdapter.get("allowedGenders", DEFAULT_POLICY.allowedGenders);
-      const savedHideExcluded = StorageAdapter.get("hideExcluded", DEFAULT_POLICY.hideExcluded);
+      const savedKeepUnknownGender = StorageAdapter.get("keepUnknownGender", DEFAULT_POLICY.keepUnknownGender);
       this.policy = {
         contentKeyword: savedKeyword,
         preferredRegions: savedRegions,
+        keepUnknownRegion: savedKeepUnknownRegion,
         allowedGenders: savedGenders,
-        hideExcluded: savedHideExcluded
+        keepUnknownGender: savedKeepUnknownGender,
+        hideExcluded: true
       };
       this.cache = new ProfileCache();
       this.fetcher = customFetcher || new ProfileFetcher();
@@ -1023,7 +1075,6 @@
       const info = extractCardInfo(cardElement);
       this.cards.set(cardElement, info);
       this.scheduler.observeCard(cardElement);
-      this.evaluateContentMatch(info);
       if (!info.userId) {
         const unknownFacts = createUnknownFacts();
         this.applyCardEvaluation(info, unknownFacts);
@@ -1034,6 +1085,8 @@
           this.factsMap.set(info.userId, cached);
           this.applyCardEvaluation(info, cached);
         } else {
+          const initialUnknown = createUnknownFacts(info.userId);
+          this.applyCardEvaluation(info, initialUnknown);
           this.enqueueEnrichment(info.userId, cardElement);
         }
       }
@@ -1072,19 +1125,16 @@
     handleKeywordChange(keyword) {
       this.policy.contentKeyword = keyword;
       StorageAdapter.set("contentKeyword", keyword);
-      this.refreshContentMatches();
+      this.refreshAll();
     }
     handlePolicyChange(partialPolicy) {
       this.policy = { ...this.policy, ...partialPolicy };
       StorageAdapter.set("allowedGenders", this.policy.allowedGenders);
+      StorageAdapter.set("keepUnknownGender", this.policy.keepUnknownGender);
       StorageAdapter.set("preferredRegions", this.policy.preferredRegions);
-      StorageAdapter.set("hideExcluded", this.policy.hideExcluded);
-      this.refreshEvaluationsOnly();
+      StorageAdapter.set("keepUnknownRegion", this.policy.keepUnknownRegion);
+      this.refreshAll();
     }
-    /**
-     * 用户手动点击 [恢复] 按钮触发单次受控探针
-     * 严格执行 exactly one probe request，绝不启动自动循环
-     */
     async handleManualRecover() {
       return this.breaker.manualProbe(async () => {
         let targetUserId = null;
@@ -1124,58 +1174,36 @@
       for (const facts of this.factsMap.values()) {
         facts.gender = this.calibrationGate.normalize(facts.rawGender);
       }
-      this.refreshEvaluationsOnly();
-    }
-    evaluateContentMatch(info) {
-      const matched = matchContent(this.policy.contentKeyword, info.title, info.nickname);
-      CardPresenter.applyContentMatch(info.cardElement, matched);
+      this.refreshAll();
     }
     applyCardEvaluation(info, facts) {
-      const result = evaluate(facts, this.policy);
-      CardPresenter.applyEvaluation(info.cardElement, result, facts, this.policy.hideExcluded);
+      const isCalibrated = this.calibrationGate.getStatus() === "CALIBRATED";
+      const result = evaluate(facts, this.policy, isCalibrated);
+      const contentMatched = matchContent(this.policy.contentKeyword, info.title, info.nickname);
+      CardPresenter.applyPresentation(info.cardElement, contentMatched, result, facts);
     }
-    refreshContentMatches() {
-      for (const info of this.cards.values()) {
-        this.evaluateContentMatch(info);
-      }
-      this.updateStats();
-    }
-    refreshEvaluationsOnly() {
+    refreshAll() {
       for (const info of this.cards.values()) {
         const facts = info.userId ? this.factsMap.get(info.userId) || this.cache.get(info.userId) || createUnknownFacts(info.userId) : createUnknownFacts();
         this.applyCardEvaluation(info, facts);
       }
       this.updateStats();
     }
-    refreshAll() {
-      this.refreshContentMatches();
-      this.refreshEvaluationsOnly();
-    }
     updateStats() {
-      let matchedCount = 0;
-      let targetCount = 0;
-      let candidateCount = 0;
-      let excludedCount = 0;
+      let visibleCount = 0;
+      const isCalibrated = this.calibrationGate.getStatus() === "CALIBRATED";
       for (const info of this.cards.values()) {
-        if (matchContent(this.policy.contentKeyword, info.title, info.nickname)) {
-          matchedCount++;
-        }
         const facts = info.userId ? this.factsMap.get(info.userId) || this.cache.get(info.userId) || createUnknownFacts(info.userId) : createUnknownFacts();
-        const evalRes = evaluate(facts, this.policy);
-        if (evalRes.status === "TARGET") {
-          targetCount++;
-        } else if (evalRes.status === "CANDIDATE") {
-          candidateCount++;
-        } else if (evalRes.status === "EXCLUDED") {
-          excludedCount++;
+        const evalRes = evaluate(facts, this.policy, isCalibrated);
+        const contentMatched = matchContent(this.policy.contentKeyword, info.title, info.nickname);
+        if (contentMatched && evalRes.status !== "EXCLUDED") {
+          visibleCount++;
         }
       }
       const stats = {
         totalCards: this.cards.size,
-        matchedCards: matchedCount,
-        targetCards: targetCount,
-        candidateCards: candidateCount,
-        excludedCards: excludedCount,
+        visibleCards: visibleCount,
+        filteredCards: this.cards.size - visibleCount,
         isPaused: this.breaker.isPaused()
       };
       this.ui.updateStats(stats);

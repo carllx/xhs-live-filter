@@ -90,21 +90,12 @@ describe('Ticket #4: Gender Calibration Gate & Configurable Qualification', () =
     const card1 = fixture.querySelector('[data-id="card-1"]') as HTMLElement; // gender = female
     const card2 = fixture.querySelector('[data-id="card-2"]') as HTMLElement; // gender = male
 
-    // card1 符合 female，未排除
-    expect(card1.getAttribute('data-xhs-filter-excluded')).toBeNull();
+    // card1 符合 female，未排除，展示极小属地事实标签
+    expect(card1.style.visibility).toBe('visible');
     const badge1 = card1.querySelector('.xhs-filter-badge');
-    expect(badge1?.textContent).toContain('🎯 广东');
+    expect(badge1?.textContent).toBe('广东');
 
-    // card2 为 male，不在 allowedGenders 内，被判定为 EXCLUDED
-    expect(card2.getAttribute('data-xhs-filter-excluded')).toBe('dimmed');
-    expect(card2.style.opacity).toBe('0.25');
-    const badge2 = card2.querySelector('.xhs-filter-badge');
-    expect(badge2?.textContent).toContain('⛔ 已排除');
-
-    // 切换 hideExcluded 为 true
-    app.setPolicy({ hideExcluded: true });
-
-    // card2 变为 hidden 但仍保留在 DOM 中，没有被删除，且没有 display: none
+    // card2 为 male，不在 allowedGenders 内，真实隐藏 (保留 DOM 几何，display != none)
     expect(card2.style.visibility).toBe('hidden');
     expect(card2.style.display).not.toBe('none');
     expect(card2.parentNode).not.toBeNull();
@@ -127,15 +118,15 @@ describe('Ticket #4: Gender Calibration Gate & Configurable Qualification', () =
     const initialCallCount = fetchFn.mock.calls.length;
     expect(initialCallCount).toBeGreaterThan(0);
 
-    // 调整策略：将偏好属地改为 ['上海']
+    // 调整策略：将属地筛选改为 ['上海']
     app.setPolicy({ preferredRegions: ['上海'] });
 
     // 网络请求次数没有增加！
     expect(fetchFn.mock.calls.length).toBe(initialCallCount);
 
-    // 状态即时更新：原来是 TARGET (广东) 的 card1 变为 CANDIDATE
+    // 状态即时更新：原来是 TARGET (广东) 的 card1 不符合上海属地被隐藏且无无用 badge
     const card1 = fixture.querySelector('[data-id="card-1"]') as HTMLElement;
-    const badge1 = card1.querySelector('.xhs-filter-badge');
-    expect(badge1?.textContent).toContain('⚪ 广东');
+    expect(card1.style.visibility).toBe('hidden');
+    expect(card1.querySelector('.xhs-filter-badge')).toBeNull();
   });
 });

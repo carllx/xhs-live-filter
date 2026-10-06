@@ -1,5 +1,5 @@
 /**
- * 悬浮胶囊与可折叠过滤面板 UI
+ * 悬浮胶囊与过滤面板 UI (v0.1.2 过滤导向设计)
  */
 
 import { V01Policy } from '../domain/policy';
@@ -14,10 +14,8 @@ export interface FilterUIEvents {
 
 export interface UIStats {
   totalCards: number;
-  matchedCards: number;
-  targetCards?: number;
-  candidateCards?: number;
-  excludedCards?: number;
+  visibleCards: number;
+  filteredCards: number;
   isPaused?: boolean;
 }
 
@@ -34,10 +32,11 @@ export class FilterUI {
   // Policy UI elements
   private femaleCheckbox!: HTMLInputElement;
   private maleCheckbox!: HTMLInputElement;
-  private unknownGenderCheckbox!: HTMLInputElement;
+  private keepUnknownGenderCheckbox!: HTMLInputElement;
   private regionInput!: HTMLInputElement;
-  private hideExcludedCheckbox!: HTMLInputElement;
-  private calibrationBadgeEl!: HTMLElement;
+  private keepUnknownRegionCheckbox!: HTMLInputElement;
+  private genderNoticeEl!: HTMLElement;
+  private calibrationStatus: 'UNCALIBRATED' | 'CALIBRATED' = 'UNCALIBRATED';
 
   constructor(events: FilterUIEvents, initialPolicy?: V01Policy) {
     this.events = events;
@@ -72,7 +71,7 @@ export class FilterUI {
     this.capsuleEl.innerHTML = `
       <span class="capsule-icon" style="font-size: 14px;">🎯</span>
       <span class="capsule-title" style="font-weight: 600;">直播过滤</span>
-      <span class="capsule-count" style="font-size: 11px; opacity: 0.9; margin-left: 2px;">(0/0)</span>
+      <span class="capsule-count" style="font-size: 11px; opacity: 0.9; margin-left: 2px;">(显示 0/0)</span>
     `;
 
     // 2. 过滤面板 (Filter Panel)
@@ -80,7 +79,7 @@ export class FilterUI {
     this.panelEl.className = 'xhs-filter-panel';
     this.panelEl.style.cssText = `
       display: none;
-      width: 300px;
+      width: 310px;
       background: #ffffff;
       border-radius: 12px;
       box-shadow: 0 8px 24px rgba(0,0,0,0.15);
@@ -95,7 +94,7 @@ export class FilterUI {
         <button class="panel-close-btn" style="background: none; border: none; font-size: 16px; cursor: pointer; color: #888;">✕</button>
       </div>
 
-      <!-- 关键词筛选 -->
+      <!-- 内容关键词 -->
       <div style="margin-bottom: 12px;">
         <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px; color: #555;">内容关键词</label>
         <div style="display: flex; gap: 6px;">
@@ -104,49 +103,53 @@ export class FilterUI {
         </div>
       </div>
 
-      <!-- 性别筛选 (Ticket #4) -->
+      <!-- 属地筛选 (真实硬筛选) -->
       <div style="margin-bottom: 12px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-          <label style="font-weight: 600; font-size: 12px; color: #555;">允许性别</label>
-          <span class="calibration-badge" style="font-size: 10px; color: #fa8c16; background: #fff7e6; padding: 1px 6px; border-radius: 4px; border: 1px solid #ffd591;">门禁: UNCALIBRATED (Fail-Open)</span>
+          <label style="font-weight: 600; font-size: 12px; color: #555;">属地筛选 (留空不限)</label>
         </div>
-        <div style="display: flex; gap: 12px; font-size: 12px; color: #444;">
-          <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
-            <input type="checkbox" class="gender-female" checked /> 女性
+        <input type="text" class="region-input" value="广东" placeholder="如：广东, 上海 (逗号分隔)" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; outline: none; margin-bottom: 6px;" />
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #666; cursor: pointer;">
+          <input type="checkbox" class="keep-unknown-region" checked />
+          <span>保留未知属地的主播 (Fail-Open)</span>
+        </label>
+      </div>
+
+      <!-- 性别筛选 (真实性门禁) -->
+      <div style="margin-bottom: 12px; padding: 8px; background: #fafafa; border-radius: 6px; border: 1px solid #f0f0f0;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+          <label style="font-weight: 600; font-size: 12px; color: #555;">性别筛选</label>
+          <span class="gender-notice" style="font-size: 10px; color: #fa8c16;">暂不可用 · 未校准</span>
+        </div>
+        <div class="gender-controls-container" style="display: flex; gap: 12px; font-size: 12px; color: #444; margin-bottom: 6px;">
+          <label style="display: flex; align-items: center; gap: 4px; cursor: not-allowed; opacity: 0.6;">
+            <input type="checkbox" class="gender-female" disabled /> 仅女性
           </label>
-          <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
-            <input type="checkbox" class="gender-male" /> 男性
+          <label style="display: flex; align-items: center; gap: 4px; cursor: not-allowed; opacity: 0.6;">
+            <input type="checkbox" class="gender-male" disabled /> 仅男性
           </label>
-          <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
-            <input type="checkbox" class="gender-unknown" checked /> 未知/未校准
-          </label>
+        </div>
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #666; cursor: not-allowed; opacity: 0.6;">
+          <input type="checkbox" class="keep-unknown-gender" checked disabled />
+          <span>保留未知性别的主播</span>
+        </label>
+        <div class="gender-desc" style="font-size: 10px; color: #888; margin-top: 4px;">
+          平台底层性别代码尚未完成权威对照，目前全量自动放行。
         </div>
       </div>
 
-      <!-- 偏好属地 (Ticket #3/4) -->
-      <div style="margin-bottom: 12px;">
-        <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px; color: #555;">偏好属地 (逗号分隔)</label>
-        <input type="text" class="region-input" value="广东" placeholder="如：广东,上海" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; outline: none;" />
-      </div>
-
-      <!-- 年龄 (置灰不可用) -->
-      <div style="margin-bottom: 12px; opacity: 0.6;">
+      <!-- 年龄区间 (置灰不可用) -->
+      <div style="margin-bottom: 12px; opacity: 0.5;">
         <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px; color: #999;">年龄区间 (公开数据不可用 · 已禁用)</label>
         <input type="text" disabled value="不限 (Fail-Open)" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #eee; border-radius: 6px; font-size: 12px; background: #fafafa; color: #aaa; cursor: not-allowed;" />
       </div>
 
-      <!-- 视图控制：hideExcluded (默认关闭) -->
-      <div style="margin-bottom: 12px; padding-top: 6px; border-top: 1px dashed #eee;">
-        <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #444; cursor: pointer;">
-          <input type="checkbox" class="hide-excluded-checkbox" />
-          <span>隐藏已排除主播 (默认低透明度保留)</span>
-        </label>
-      </div>
-
+      <!-- 统计信息 -->
       <div class="stats-section" style="padding: 8px; background: #f9f9f9; border-radius: 6px; font-size: 11px; color: #666; margin-bottom: 8px;">
-        统计: <span class="stats-text">0 卡片</span>
+        <span class="stats-text">当前显示 0 / 0 张卡片</span>
       </div>
 
+      <!-- 风控保护警告 -->
       <div class="paused-warning" style="display: none; padding: 6px 8px; background: #fffbe6; border: 1px solid #ffe58f; border-radius: 6px; font-size: 11px; color: #d46b08; margin-bottom: 8px; justify-content: space-between; align-items: center;">
         <span>⚠️ 已暂停 · 风控保护</span>
         <button class="recover-btn" style="padding: 2px 8px; background: #fa8c16; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">恢复</button>
@@ -165,16 +168,16 @@ export class FilterUI {
 
     this.femaleCheckbox = this.panelEl.querySelector('.gender-female') as HTMLInputElement;
     this.maleCheckbox = this.panelEl.querySelector('.gender-male') as HTMLInputElement;
-    this.unknownGenderCheckbox = this.panelEl.querySelector('.gender-unknown') as HTMLInputElement;
+    this.keepUnknownGenderCheckbox = this.panelEl.querySelector('.keep-unknown-gender') as HTMLInputElement;
     this.regionInput = this.panelEl.querySelector('.region-input') as HTMLInputElement;
-    this.hideExcludedCheckbox = this.panelEl.querySelector('.hide-excluded-checkbox') as HTMLInputElement;
-    this.calibrationBadgeEl = this.panelEl.querySelector('.calibration-badge') as HTMLElement;
+    this.keepUnknownRegionCheckbox = this.panelEl.querySelector('.keep-unknown-region') as HTMLInputElement;
+    this.genderNoticeEl = this.panelEl.querySelector('.gender-notice') as HTMLElement;
 
     if (initialPolicy) {
       this.syncPolicyToUI(initialPolicy);
     }
 
-    // 事件监听
+    // 事件绑定
     this.capsuleEl.addEventListener('click', () => this.togglePanel());
     closeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -197,56 +200,72 @@ export class FilterUI {
       }
     });
 
-    // 策略修改触发纯评估
     const handlePolicyUpdate = () => {
       const allowedGenders: string[] = [];
       if (this.femaleCheckbox.checked) allowedGenders.push('female');
       if (this.maleCheckbox.checked) allowedGenders.push('male');
-      if (this.unknownGenderCheckbox.checked) allowedGenders.push('unknown');
 
       const regions = this.regionInput.value
         .split(/[,，]/)
         .map((s) => s.trim())
         .filter(Boolean);
 
-      const hideExcluded = this.hideExcludedCheckbox.checked;
+      const keepUnknownRegion = this.keepUnknownRegionCheckbox.checked;
+      const keepUnknownGender = this.keepUnknownGenderCheckbox.checked;
 
       if (this.events.onPolicyChange) {
         this.events.onPolicyChange({
           allowedGenders,
+          keepUnknownGender,
           preferredRegions: regions,
-          hideExcluded,
+          keepUnknownRegion,
         });
       }
     };
 
     this.femaleCheckbox.addEventListener('change', handlePolicyUpdate);
     this.maleCheckbox.addEventListener('change', handlePolicyUpdate);
-    this.unknownGenderCheckbox.addEventListener('change', handlePolicyUpdate);
+    this.keepUnknownGenderCheckbox.addEventListener('change', handlePolicyUpdate);
     this.regionInput.addEventListener('input', handlePolicyUpdate);
-    this.hideExcludedCheckbox.addEventListener('change', handlePolicyUpdate);
+    this.keepUnknownRegionCheckbox.addEventListener('change', handlePolicyUpdate);
   }
 
   syncPolicyToUI(policy: V01Policy): void {
     this.keywordInput.value = policy.contentKeyword;
     this.femaleCheckbox.checked = policy.allowedGenders.includes('female');
     this.maleCheckbox.checked = policy.allowedGenders.includes('male');
-    this.unknownGenderCheckbox.checked = policy.allowedGenders.includes('unknown');
+    this.keepUnknownGenderCheckbox.checked = policy.keepUnknownGender;
     this.regionInput.value = policy.preferredRegions.join(', ');
-    this.hideExcludedCheckbox.checked = policy.hideExcluded;
+    this.keepUnknownRegionCheckbox.checked = policy.keepUnknownRegion;
   }
 
   setCalibrationStatus(status: 'UNCALIBRATED' | 'CALIBRATED'): void {
+    this.calibrationStatus = status;
+    const labels = this.panelEl.querySelectorAll('.gender-controls-container label, label:has(.keep-unknown-gender)');
+    const desc = this.panelEl.querySelector('.gender-desc') as HTMLElement;
+
     if (status === 'CALIBRATED') {
-      this.calibrationBadgeEl.textContent = '门禁: CALIBRATED';
-      this.calibrationBadgeEl.style.color = '#52c41a';
-      this.calibrationBadgeEl.style.background = '#f6ffed';
-      this.calibrationBadgeEl.style.borderColor = '#b7eb8f';
+      this.genderNoticeEl.textContent = '已启用';
+      this.genderNoticeEl.style.color = '#52c41a';
+      this.femaleCheckbox.disabled = false;
+      this.maleCheckbox.disabled = false;
+      this.keepUnknownGenderCheckbox.disabled = false;
+      labels.forEach((l) => {
+        (l as HTMLElement).style.opacity = '1';
+        (l as HTMLElement).style.cursor = 'pointer';
+      });
+      desc.textContent = '已应用可靠平台对照标准，可精确筛选。';
     } else {
-      this.calibrationBadgeEl.textContent = '门禁: UNCALIBRATED (Fail-Open)';
-      this.calibrationBadgeEl.style.color = '#fa8c16';
-      this.calibrationBadgeEl.style.background = '#fff7e6';
-      this.calibrationBadgeEl.style.borderColor = '#ffd591';
+      this.genderNoticeEl.textContent = '暂不可用 · 未校准';
+      this.genderNoticeEl.style.color = '#fa8c16';
+      this.femaleCheckbox.disabled = true;
+      this.maleCheckbox.disabled = true;
+      this.keepUnknownGenderCheckbox.disabled = true;
+      labels.forEach((l) => {
+        (l as HTMLElement).style.opacity = '0.6';
+        (l as HTMLElement).style.cursor = 'not-allowed';
+      });
+      desc.textContent = '平台底层性别代码尚未完成权威对照，目前全量自动放行。';
     }
   }
 
@@ -275,15 +294,15 @@ export class FilterUI {
   updateStats(stats: UIStats): void {
     const countEl = this.capsuleEl.querySelector('.capsule-count');
     if (countEl) {
-      countEl.textContent = `(${stats.matchedCards}/${stats.totalCards})`;
+      countEl.textContent = `(${stats.visibleCards}/${stats.totalCards})`;
     }
 
-    let statsDetail = `发现 ${stats.totalCards} 张卡片，匹配 ${stats.matchedCards} 张`;
-    if (stats.targetCards !== undefined && stats.candidateCards !== undefined) {
-      statsDetail += ` (🎯 ${stats.targetCards} 优先 | ⚪ ${stats.candidateCards} 普通)`;
+    let statsDetail = `显示 ${stats.visibleCards} / ${stats.totalCards} 张卡片`;
+    if (stats.filteredCards > 0) {
+      statsDetail += `（过滤掉 ${stats.filteredCards} 张）`;
     }
-    if (stats.excludedCards !== undefined && stats.excludedCards > 0) {
-      statsDetail += ` [⛔ 排除 ${stats.excludedCards}]`;
+    if (this.calibrationStatus === 'UNCALIBRATED') {
+      statsDetail += ` · 性别筛选未生效 (Fail-Open)`;
     }
     this.statsTextEl.textContent = statsDetail;
 

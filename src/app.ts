@@ -36,14 +36,17 @@ export class LiveFilterApp {
     // 读取持久化策略
     const savedKeyword = StorageAdapter.get<string>('contentKeyword', '');
     const savedRegions = StorageAdapter.get<string[]>('preferredRegions', DEFAULT_POLICY.preferredRegions);
+    const savedKeepUnknownRegion = StorageAdapter.get<boolean>('keepUnknownRegion', DEFAULT_POLICY.keepUnknownRegion);
     const savedGenders = StorageAdapter.get<string[]>('allowedGenders', DEFAULT_POLICY.allowedGenders);
-    const savedHideExcluded = StorageAdapter.get<boolean>('hideExcluded', DEFAULT_POLICY.hideExcluded);
+    const savedKeepUnknownGender = StorageAdapter.get<boolean>('keepUnknownGender', DEFAULT_POLICY.keepUnknownGender);
 
     this.policy = {
       contentKeyword: savedKeyword,
       preferredRegions: savedRegions,
+      keepUnknownRegion: savedKeepUnknownRegion,
       allowedGenders: savedGenders,
-      hideExcluded: savedHideExcluded,
+      keepUnknownGender: savedKeepUnknownGender,
+      hideExcluded: true,
     };
 
     this.cache = new ProfileCache();
@@ -97,23 +100,20 @@ export class LiveFilterApp {
     // 视口观察器挂载
     this.scheduler.observeCard(cardElement);
 
-    // 1. 内容子串匹配
-    this.evaluateContentMatch(info);
-
-    // 2. 数据增强处理
+    // 初始呈现（根据已有已知事实）
     if (!info.userId) {
-      // 无法提取 userId：0 请求，标记 unknown，Fail-Open
       const unknownFacts = createUnknownFacts();
       this.applyCardEvaluation(info, unknownFacts);
     } else {
-      // 检查缓存
       const cached = this.cache.get(info.userId);
       if (cached) {
         cached.gender = this.calibrationGate.normalize(cached.rawGender);
         this.factsMap.set(info.userId, cached);
         this.applyCardEvaluation(info, cached);
       } else {
-        // 加入视口感知调度器排队
+        // 未缓存时先按 unknown 呈现并加入调度排队
+        const initialUnknown = createUnknownFacts(info.userId);
+        this.applyCardEvaluation(info, initialUnknown);
         this.enqueueEnrichment(info.userId, cardElement);
       }
     }
@@ -134,7 +134,7 @@ export class LiveFilterApp {
           this.cache.set(userId, facts);
           this.factsMap.set(userId, facts);
 
-          // 重新评估并呈现该 userId 的所有卡片
+          // 重新呈现该 userId 的所有卡片
           for (const info of this.cards.values()) {
             if (info.userId === userId) {
               this.applyCardEvaluation(info, facts);
@@ -145,7 +145,6 @@ export class LiveFilterApp {
           const isVerification = (err as { isVerification?: boolean })?.isVerification;
 
           if (isRateLimited || isVerification) {
-            // 遇到 429 或验证码立即熔断暂停
             this.breaker.trip(isRateLimited ? 'HTTP 429 限流' : '出现验证码重定向');
           } else {
             console.warn(`[xhs-live-filter] Enrich user ${userId} failed (ordinary):`, err);
@@ -160,25 +159,21 @@ export class LiveFilterApp {
   private handleKeywordChange(keyword: string): void {
     this.policy.contentKeyword = keyword;
     StorageAdapter.set('contentKeyword', keyword);
-    this.refreshContentMatches();
+    this.refreshAll();
   }
 
   private handlePolicyChange(partialPolicy: Partial<V01Policy>): void {
     this.policy = { ...this.policy, ...partialPolicy };
     StorageAdapter.set('allowedGenders', this.policy.allowedGenders);
+    StorageAdapter.set('keepUnknownGender', this.policy.keepUnknownGender);
     StorageAdapter.set('preferredRegions', this.policy.preferredRegions);
-    StorageAdapter.set('hideExcluded', this.policy.hideExcluded);
+    StorageAdapter.set('keepUnknownRegion', this.policy.keepUnknownRegion);
 
-    this.refreshEvaluationsOnly();
+    this.refreshAll();
   }
 
-  /**
-   * 用户手动点击 [恢复] 按钮触发单次受控探针
-   * 严格执行 exactly one probe request，绝不启动自动循环
-   */
   async handleManualRecover(): Promise<boolean> {
     return this.breaker.manualProbe(async () => {
-      // 寻找视口内第一个未增强的 userId 作为探针目标
       let targetUserId: string | null = null;
       for (const info of this.cards.values()) {
         if (info.userId && !this.factsMap.has(info.userId) && !this.cache.get(info.userId)) {
@@ -187,7 +182,6 @@ export class LiveFilterApp {
         }
       }
       if (!targetUserId) {
-        // 如果没有未增强的卡片，直接恢复为 RUNNING
         return true;
       }
 
@@ -209,7 +203,6 @@ export class LiveFilterApp {
         if (isRateLimited || isVerification) {
           return false;
         }
-        // 普通错误不阻止恢复
         return true;
       }
     });
@@ -223,27 +216,17 @@ export class LiveFilterApp {
       facts.gender = this.calibrationGate.normalize(facts.rawGender);
     }
 
-    this.refreshEvaluationsOnly();
-  }
-
-  private evaluateContentMatch(info: ExtractedCardInfo): void {
-    const matched = matchContent(this.policy.contentKeyword, info.title, info.nickname);
-    CardPresenter.applyContentMatch(info.cardElement, matched);
+    this.refreshAll();
   }
 
   private applyCardEvaluation(info: ExtractedCardInfo, facts: NormalizedFacts): void {
-    const result: EvaluationResult = evaluate(facts, this.policy);
-    CardPresenter.applyEvaluation(info.cardElement, result, facts, this.policy.hideExcluded);
+    const isCalibrated = this.calibrationGate.getStatus() === 'CALIBRATED';
+    const result: EvaluationResult = evaluate(facts, this.policy, isCalibrated);
+    const contentMatched = matchContent(this.policy.contentKeyword, info.title, info.nickname);
+    CardPresenter.applyPresentation(info.cardElement, contentMatched, result, facts);
   }
 
-  private refreshContentMatches(): void {
-    for (const info of this.cards.values()) {
-      this.evaluateContentMatch(info);
-    }
-    this.updateStats();
-  }
-
-  private refreshEvaluationsOnly(): void {
+  private refreshAll(): void {
     for (const info of this.cards.values()) {
       const facts = info.userId
         ? this.factsMap.get(info.userId) || this.cache.get(info.userId) || createUnknownFacts(info.userId)
@@ -253,40 +236,25 @@ export class LiveFilterApp {
     this.updateStats();
   }
 
-  private refreshAll(): void {
-    this.refreshContentMatches();
-    this.refreshEvaluationsOnly();
-  }
-
   private updateStats(): void {
-    let matchedCount = 0;
-    let targetCount = 0;
-    let candidateCount = 0;
-    let excludedCount = 0;
+    let visibleCount = 0;
+    const isCalibrated = this.calibrationGate.getStatus() === 'CALIBRATED';
 
     for (const info of this.cards.values()) {
-      if (matchContent(this.policy.contentKeyword, info.title, info.nickname)) {
-        matchedCount++;
-      }
       const facts = info.userId
         ? this.factsMap.get(info.userId) || this.cache.get(info.userId) || createUnknownFacts(info.userId)
         : createUnknownFacts();
-      const evalRes = evaluate(facts, this.policy);
-      if (evalRes.status === 'TARGET') {
-        targetCount++;
-      } else if (evalRes.status === 'CANDIDATE') {
-        candidateCount++;
-      } else if (evalRes.status === 'EXCLUDED') {
-        excludedCount++;
+      const evalRes = evaluate(facts, this.policy, isCalibrated);
+      const contentMatched = matchContent(this.policy.contentKeyword, info.title, info.nickname);
+      if (contentMatched && evalRes.status !== 'EXCLUDED') {
+        visibleCount++;
       }
     }
 
     const stats: UIStats = {
       totalCards: this.cards.size,
-      matchedCards: matchedCount,
-      targetCards: targetCount,
-      candidateCards: candidateCount,
-      excludedCards: excludedCount,
+      visibleCards: visibleCount,
+      filteredCards: this.cards.size - visibleCount,
       isPaused: this.breaker.isPaused(),
     };
     this.ui.updateStats(stats);

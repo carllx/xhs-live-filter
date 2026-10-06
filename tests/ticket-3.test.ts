@@ -120,13 +120,13 @@ describe('Ticket #3: Visible-card Profile Enrichment + 广东优先闭环', () =
     // Card 4 绝不发起请求
     expect(fetchCalls.some((url) => url.includes('card-4'))).toBe(false);
 
-    // Card 4 保持可见并标记为 CANDIDATE
+    // Card 4 保持可见（默认 keepUnknownRegion=true），CANDIDATE 无任何杂质 Badge
     expect(card4.style.visibility).toBe('visible');
     const badge = card4.querySelector('.xhs-filter-badge');
-    expect(badge?.textContent).toContain('⚪');
+    expect(badge).toBeNull();
   });
 
-  it('集成测试：卡片命中广东偏好标记为 TARGET，非偏好标记为 CANDIDATE（不排除）', async () => {
+  it('集成测试：卡片命中广东标记为 TARGET（极小事实标签），非偏好属地真实过滤隐藏', async () => {
     const mockProfiles: Record<string, string> = {
       user_001: '<script>window.__INITIAL_STATE__={"user":{"userPageData":{"basicInfo":{"gender":1,"ipLocation":"广东"}}}};</script>',
       user_002: '<script>window.__INITIAL_STATE__={"user":{"userPageData":{"basicInfo":{"gender":0,"ipLocation":"上海"}}}};</script>',
@@ -150,22 +150,21 @@ describe('Ticket #3: Visible-card Profile Enrichment + 广东优先闭环', () =
     const card2 = fixture.querySelector('[data-id="card-2"]') as HTMLElement; // 上海
     const card3 = fixture.querySelector('[data-id="card-3"]') as HTMLElement; // 广东
 
-    // Card 1: 广东 => TARGET (🎯 广东)
+    // Card 1: 广东 => TARGET，显示极小事实标签 "广东"
     const badge1 = card1.querySelector('.xhs-filter-badge');
-    expect(badge1?.textContent).toContain('🎯 广东');
+    expect(badge1?.textContent).toBe('广东');
 
-    // Card 2: 上海 => CANDIDATE (⚪ 上海)（非偏好属地不排除，仍可见）
-    const badge2 = card2.querySelector('.xhs-filter-badge');
-    expect(badge2?.textContent).toContain('⚪ 上海');
-    expect(card2.style.visibility).toBe('visible');
+    // Card 2: 上海 => 默认属地筛选过滤，真实隐藏；无任何普通 Badge
+    expect(card2.style.visibility).toBe('hidden');
+    expect(card2.querySelector('.xhs-filter-badge')).toBeNull();
 
-    // Card 3: 广东 => TARGET (🎯 广东)
+    // Card 3: 广东 => TARGET，显示极小事实标签 "广东"
     const badge3 = card3.querySelector('.xhs-filter-badge');
-    expect(badge3?.textContent).toContain('🎯 广东');
+    expect(badge3?.textContent).toBe('广东');
 
-    // 胶囊更新
+    // 统计更新：显示 3 / 4（card1, card3, 以及 unknown 的 card4）
     const panel = app.getUI().getPanelElement();
     const statsText = panel.querySelector('.stats-text');
-    expect(statsText?.textContent).toContain('🎯 2 优先 | ⚪ 2 普通');
+    expect(statsText?.textContent).toContain('显示 3 / 4 张卡片');
   });
 });

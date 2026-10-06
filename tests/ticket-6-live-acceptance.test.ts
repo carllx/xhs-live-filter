@@ -122,22 +122,23 @@ describe('Ticket #6: Bounded Live Acceptance & Release Verification', () => {
     // 等待异步队列调度
     await new Promise((r) => setTimeout(r, 350));
 
-    // Card C 没有 userId，绝不发起请求
+    // Card C 没有 userId，绝不发起请求，且无任何无用 Badge
     expect(fetchedUrls.some((u) => u.includes('card-c') || u.includes('无人值守'))).toBe(false);
     const cardC = container.querySelector('[data-id="card-c"]') as HTMLElement;
     expect(cardC.style.visibility).toBe('visible');
     const badgeC = cardC.querySelector('.xhs-filter-badge');
-    expect(badgeC?.textContent).toContain('⚪'); // Fail-open to CANDIDATE
+    expect(badgeC).toBeNull(); // 无用 Badge 已彻底移除
 
-    // Card A (广东) => TARGET
+    // Card A (广东) => TARGET，仅显示极小属地事实标签
     const cardA = container.querySelector('[data-id="card-a"]') as HTMLElement;
+    expect(cardA.style.visibility).toBe('visible');
     const badgeA = cardA.querySelector('.xhs-filter-badge');
-    expect(badgeA?.textContent).toContain('🎯 广东');
+    expect(badgeA?.textContent).toBe('广东');
 
-    // Card B (北京) => CANDIDATE (未被排除)
+    // Card B (北京) => 不符合属地广东，真实过滤隐藏
     const cardB = container.querySelector('[data-id="card-b"]') as HTMLElement;
-    const badgeB = cardB.querySelector('.xhs-filter-badge');
-    expect(badgeB?.textContent).toContain('⚪ 北京');
+    expect(cardB.style.visibility).toBe('hidden');
+    expect(cardB.querySelector('.xhs-filter-badge')).toBeNull();
 
     // 验证 Gender Calibration 当前保持在真实 UNCALIBRATED 状态
     expect(app.getCalibrationGate().getStatus()).toBe('UNCALIBRATED');

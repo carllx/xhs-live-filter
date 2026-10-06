@@ -1,7 +1,7 @@
 /**
  * 内容子串匹配与领域评估
  * 严格遵循既定领域状态：TARGET, CANDIDATE, EXCLUDED
- * 遵循 ADR-0002 与 ADR-0006：事实与策略解耦，属地偏好只决定优先级，不产生硬排除
+ * 过滤判定：visible = contentMatch AND genderMatch AND regionMatch
  */
 
 import { NormalizedFacts } from './facts';
@@ -12,6 +12,8 @@ export type QualificationStatus = 'TARGET' | 'CANDIDATE' | 'EXCLUDED';
 export interface EvaluationResult {
   status: QualificationStatus;
   regionPriority: number;
+  genderMatch: boolean;
+  regionMatch: boolean;
   reason?: string;
 }
 
@@ -29,34 +31,67 @@ export function matchContent(keyword: string, title: string, nickname: string): 
 }
 
 /**
- * 纯函数评估：根据当前 Facts 和 Active Filter Policy 判定状态
+ * 纯函数评估：根据当前 Facts 和 Active Filter Policy 判定资格与可见性
+ * @param facts 主播归一化事实
+ * @param policy 过滤策略
+ * @param isCalibrated 性别门禁是否已校准（未校准时性别筛选自动 Fail-Open 为 true）
  */
-export function evaluate(facts: NormalizedFacts, policy: V01Policy): EvaluationResult {
-  // 1. 资格检查：仅当 normalized gender 已知且不在允许列表中时，才判定为 EXCLUDED
-  // unknown 严格 Fail-Open（不排除）
-  if (facts.gender !== 'unknown' && !policy.allowedGenders.includes(facts.gender)) {
+export function evaluate(
+  facts: NormalizedFacts,
+  policy: V01Policy,
+  isCalibrated: boolean = false
+): EvaluationResult {
+  // 1. 性别匹配判定 (Gender Match)
+  let genderMatch = true;
+  if (!isCalibrated) {
+    // 门禁未校准时，性别筛选能力不可用，严格 Fail-Open
+    genderMatch = true;
+  } else {
+    // 已校准状态
+    if (facts.gender === 'unknown') {
+      genderMatch = policy.keepUnknownGender;
+    } else {
+      genderMatch = policy.allowedGenders.includes(facts.gender);
+    }
+  }
+
+  // 2. 属地匹配判定 (Region Match)
+  let regionMatch = true;
+  const hasRegionFilter = policy.preferredRegions.length > 0;
+  if (hasRegionFilter) {
+    if (facts.region === 'unknown') {
+      regionMatch = policy.keepUnknownRegion;
+    } else {
+      regionMatch = policy.preferredRegions.includes(facts.region);
+    }
+  }
+
+  // 3. 综合判定状态
+  if (!genderMatch || !regionMatch) {
     return {
       status: 'EXCLUDED',
       regionPriority: 0,
-      reason: `性别不匹配 (${facts.gender})`,
+      genderMatch,
+      regionMatch,
+      reason: !genderMatch ? `性别不符 (${facts.gender})` : `属地不符 (${facts.region})`,
     };
   }
 
-  // 2. 属地优先级计算（遵循 ADR-0002：属地不符绝不产生硬排除）
-  let regionPriority = 0;
-  if (facts.region !== 'unknown' && policy.preferredRegions.includes(facts.region)) {
-    regionPriority = 1;
-  }
-
-  if (regionPriority > 0) {
+  // 命中属地筛选列表时赋予 TARGET，其余（如未知属地保留或未限属地）为 CANDIDATE
+  const isTargetRegion = facts.region !== 'unknown' && policy.preferredRegions.includes(facts.region);
+  if (isTargetRegion) {
     return {
       status: 'TARGET',
-      regionPriority,
+      regionPriority: 1,
+      genderMatch,
+      regionMatch,
     };
   }
 
   return {
     status: 'CANDIDATE',
     regionPriority: 0,
+    genderMatch,
+    regionMatch,
   };
 }
