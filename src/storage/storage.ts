@@ -37,4 +37,16 @@ export class StorageAdapter {
       console.warn(`[xhs-live-filter] Write storage key '${key}' failed:`, e);
     }
   }
+
+  static remove(key: string): void {
+    try {
+      if (this.isGMSupported()) {
+        GM_setValue(key, null);
+        return;
+      }
+      localStorage.removeItem(`xhs_filter_${key}`);
+    } catch (e) {
+      console.warn(`[xhs-live-filter] Remove storage key '${key}' failed:`, e);
+    }
+  }
 }

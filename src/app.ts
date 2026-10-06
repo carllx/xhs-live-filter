@@ -5,7 +5,7 @@
 import { evaluate, EvaluationResult, matchContent } from './domain/evaluation';
 import { createUnknownFacts, NormalizedFacts, NormalizedGender } from './domain/facts';
 import { GenderCalibrationGate } from './domain/gender-calibration';
-import { DEFAULT_POLICY, V01Policy } from './domain/policy';
+import { DEFAULT_POLICY, ProfileSafetyPause, STORAGE_KEYS, V01Policy } from './domain/policy';
 import { extractCardInfo, ExtractedCardInfo } from './dom/card-extractor';
 import { CardObserver } from './dom/card-observer';
 import { CardPresenter } from './dom/card-presenter';
@@ -31,6 +31,7 @@ export class LiveFilterApp {
   private identityStore: FeedIdentityStore;
   private unsubscribeIdentityStore?: () => void;
   private boundCardCount = 0;
+  private safetyPauseLatch: ProfileSafetyPause | null = null;
 
   constructor(
     customFetcher?: ProfileFetcher,
@@ -41,13 +42,19 @@ export class LiveFilterApp {
     initialPolicy?: Partial<V01Policy>
   ) {
     // 读取持久化策略
-    const savedKeyword = StorageAdapter.get<string>('contentKeyword', '');
-    const savedRegions = StorageAdapter.get<string[]>('preferredRegions', DEFAULT_POLICY.preferredRegions);
-    const savedKeepUnknownRegion = StorageAdapter.get<boolean>('keepUnknownRegion', DEFAULT_POLICY.keepUnknownRegion);
-    const savedGenders = StorageAdapter.get<string[]>('allowedGenders', DEFAULT_POLICY.allowedGenders);
-    const savedKeepUnknownGender = StorageAdapter.get<boolean>('keepUnknownGender', DEFAULT_POLICY.keepUnknownGender);
-    // 显式授权门禁：未显式开启或旧用户缺省时严格 Fail-Closed 为 false
-    const savedEnrichmentEnabled = StorageAdapter.get<boolean>('profileEnrichmentEnabled', DEFAULT_POLICY.profileEnrichmentEnabled);
+    const savedKeyword = StorageAdapter.get<string>(STORAGE_KEYS.CONTENT_KEYWORD, '');
+    const savedRegions = StorageAdapter.get<string[]>(STORAGE_KEYS.PREFERRED_REGIONS, DEFAULT_POLICY.preferredRegions);
+    const savedKeepUnknownRegion = StorageAdapter.get<boolean>(STORAGE_KEYS.KEEP_UNKNOWN_REGION, DEFAULT_POLICY.keepUnknownRegion);
+    const savedGenders = StorageAdapter.get<string[]>(STORAGE_KEYS.ALLOWED_GENDERS, DEFAULT_POLICY.allowedGenders);
+    const savedKeepUnknownGender = StorageAdapter.get<boolean>(STORAGE_KEYS.KEEP_UNKNOWN_GENDER, DEFAULT_POLICY.keepUnknownGender);
+    // 检查持久化安全闭锁 (Persistent Safety Latch, 如 300013)
+    this.safetyPauseLatch = StorageAdapter.get<ProfileSafetyPause | null>(STORAGE_KEYS.PROFILE_SAFETY_PAUSE, null);
+
+    // 显式授权门禁：未显式开启、旧用户缺省、或存在 safety latch 时强制为 false
+    let savedEnrichmentEnabled = StorageAdapter.get<boolean>(STORAGE_KEYS.PROFILE_ENRICHMENT_ENABLED, DEFAULT_POLICY.profileEnrichmentEnabled);
+    if (this.safetyPauseLatch) {
+      savedEnrichmentEnabled = false;
+    }
 
     this.policy = {
       contentKeyword: savedKeyword,
@@ -59,6 +66,9 @@ export class LiveFilterApp {
       profileEnrichmentEnabled: savedEnrichmentEnabled,
       ...initialPolicy,
     };
+    if (this.safetyPauseLatch && !initialPolicy?.profileEnrichmentEnabled) {
+      this.policy.profileEnrichmentEnabled = false;
+    }
 
     this.cache = new ProfileCache();
     this.fetcher = customFetcher || new ProfileFetcher();
@@ -89,6 +99,11 @@ export class LiveFilterApp {
     );
 
     this.ui.setCalibrationStatus(this.calibrationGate.getStatus());
+
+    // 若启动时存在安全闭锁，立即将 breaker 设为 PAUSED（此时 this.ui 已初始化）
+    if (this.safetyPauseLatch) {
+      this.breaker.trip(this.safetyPauseLatch.reason || 'XHS 300013 rate limit');
+    }
 
     this.observer = new CardObserver({
       onCardDiscovered: (card) => this.handleCardDiscovered(card),
@@ -171,6 +186,16 @@ export class LiveFilterApp {
       return false;
     }
 
+    // 持久化安全闭锁门禁：若当前存在安全闭锁（如 300013），严禁启动任何主动请求
+    if (this.safetyPauseLatch) {
+      return false;
+    }
+
+    // 熔断保护门禁：若熔断器处于 PAUSED 状态，严禁启动任何主动请求
+    if (this.breaker.isPaused()) {
+      return false;
+    }
+
     // 只有当当前策略实际需要 Profile Facts 时才启动网络请求：
     // 1. 设置了目标属地（preferredRegions.length > 0）
     // 2. 或性别门禁已校准（gender gate === CALIBRATED）
@@ -212,7 +237,7 @@ export class LiveFilterApp {
       cardElement,
       priority: this.scheduler.getCardPriority(cardElement),
       execute: async () => {
-        // 第二层门禁：任务出队执行前再次复核用户授权门禁与需求状态
+        // 第二层门禁：任务出队执行前再次复核用户授权门禁、安全闭锁与熔断器状态
         if (!this.isEnrichmentNeeded()) {
           return;
         }
@@ -234,11 +259,34 @@ export class LiveFilterApp {
           const isSecurityStop = (err as { isSecurityStop?: boolean })?.isSecurityStop;
           const isRateLimited = (err as { isRateLimited?: boolean })?.isRateLimited;
           const isVerification = (err as { isVerification?: boolean })?.isVerification;
+          const errCode = (err as { code?: number | string })?.code;
           const reason = (err as { reason?: string })?.reason || (isRateLimited ? 'HTTP 429 限流' : isVerification ? '出现验证码重定向' : '安全拦截');
 
           if (isSecurityStop || isRateLimited || isVerification) {
             ProfileFetcher.recordPaused(reason);
+
+            // 如果是 300013 限流或包含 300013
+            if (errCode === 300013 || errCode === '300013' || reason.includes('300013')) {
+              this.safetyPauseLatch = {
+                code: 300013,
+                reason: 'XHS 300013 rate limit',
+                detectedAt: Date.now(),
+              };
+              StorageAdapter.set(STORAGE_KEYS.PROFILE_SAFETY_PAUSE, this.safetyPauseLatch);
+            }
+
+            // 安全关闭：profileEnrichmentEnabled 设为 false 并持久化
+            this.policy.profileEnrichmentEnabled = false;
+            StorageAdapter.set(STORAGE_KEYS.PROFILE_ENRICHMENT_ENABLED, false);
+
+            // 清空所有尚未开始的待处理排队任务
+            this.scheduler.clearPendingQueue();
+
+            // CircuitBreaker 熔断
             this.breaker.trip(reason);
+
+            // 同步 UI 状态与复选框
+            this.ui.syncPolicyToUI(this.policy);
           } else {
             console.warn(`[xhs-live-filter] Enrich user failed (ordinary fail-open):`, err);
           }
@@ -251,18 +299,18 @@ export class LiveFilterApp {
 
   private handleKeywordChange(keyword: string): void {
     this.policy.contentKeyword = keyword;
-    StorageAdapter.set('contentKeyword', keyword);
+    StorageAdapter.set(STORAGE_KEYS.CONTENT_KEYWORD, keyword);
     this.refreshAll();
   }
 
   private handlePolicyChange(partialPolicy: Partial<V01Policy>): void {
     const wasEnrichmentNeeded = this.isEnrichmentNeeded();
     this.policy = { ...this.policy, ...partialPolicy };
-    StorageAdapter.set('allowedGenders', this.policy.allowedGenders);
-    StorageAdapter.set('keepUnknownGender', this.policy.keepUnknownGender);
-    StorageAdapter.set('preferredRegions', this.policy.preferredRegions);
-    StorageAdapter.set('keepUnknownRegion', this.policy.keepUnknownRegion);
-    StorageAdapter.set('profileEnrichmentEnabled', this.policy.profileEnrichmentEnabled);
+    StorageAdapter.set(STORAGE_KEYS.ALLOWED_GENDERS, this.policy.allowedGenders);
+    StorageAdapter.set(STORAGE_KEYS.KEEP_UNKNOWN_GENDER, this.policy.keepUnknownGender);
+    StorageAdapter.set(STORAGE_KEYS.PREFERRED_REGIONS, this.policy.preferredRegions);
+    StorageAdapter.set(STORAGE_KEYS.KEEP_UNKNOWN_REGION, this.policy.keepUnknownRegion);
+    StorageAdapter.set(STORAGE_KEYS.PROFILE_ENRICHMENT_ENABLED, this.policy.profileEnrichmentEnabled);
 
     if (!this.policy.profileEnrichmentEnabled) {
       // 授权关闭：立即清除待处理排队任务，停止后续请求
@@ -289,6 +337,12 @@ export class LiveFilterApp {
         }
       }
       if (!targetUserId) {
+        // 无待处理卡片时直接视为探测成功，清除闭锁
+        this.safetyPauseLatch = null;
+        StorageAdapter.remove(STORAGE_KEYS.PROFILE_SAFETY_PAUSE);
+        this.policy.profileEnrichmentEnabled = false;
+        StorageAdapter.set(STORAGE_KEYS.PROFILE_ENRICHMENT_ENABLED, false);
+        this.ui.syncPolicyToUI(this.policy);
         return true;
       }
 
@@ -303,11 +357,31 @@ export class LiveFilterApp {
             this.applyCardEvaluation(info, facts);
           }
         }
+
+        // 探测成功：清除持久化安全闭锁，但 profileEnrichmentEnabled 仍保持 false，不自动恢复 batch enrichment
+        this.safetyPauseLatch = null;
+        StorageAdapter.remove(STORAGE_KEYS.PROFILE_SAFETY_PAUSE);
+        this.policy.profileEnrichmentEnabled = false;
+        StorageAdapter.set(STORAGE_KEYS.PROFILE_ENRICHMENT_ENABLED, false);
+        this.ui.syncPolicyToUI(this.policy);
+
         return true;
       } catch (err: unknown) {
         const isSecurityStop = (err as { isSecurityStop?: boolean })?.isSecurityStop;
         const isRateLimited = (err as { isRateLimited?: boolean })?.isRateLimited;
         const isVerification = (err as { isVerification?: boolean })?.isVerification;
+        const errCode = (err as { code?: number | string })?.code;
+        const reason = (err as { reason?: string })?.reason || '安全拦截';
+
+        if (errCode === 300013 || errCode === '300013' || reason.includes('300013')) {
+          this.safetyPauseLatch = {
+            code: 300013,
+            reason: 'XHS 300013 rate limit',
+            detectedAt: Date.now(),
+          };
+          StorageAdapter.set(STORAGE_KEYS.PROFILE_SAFETY_PAUSE, this.safetyPauseLatch);
+        }
+
         if (isSecurityStop || isRateLimited || isVerification) {
           return false;
         }
@@ -359,11 +433,14 @@ export class LiveFilterApp {
       }
     }
 
+    const isPaused = this.breaker.isPaused() || !!this.safetyPauseLatch;
     const stats: UIStats = {
       totalCards: this.cards.size,
       visibleCards: visibleCount,
       filteredCards: this.cards.size - visibleCount,
-      isPaused: this.breaker.isPaused(),
+      isPaused,
+      pauseReason: this.safetyPauseLatch?.reason || this.breaker.getReason(),
+      pauseCode: this.safetyPauseLatch?.code,
     };
     this.ui.updateStats(stats);
   }
@@ -407,6 +484,10 @@ export class LiveFilterApp {
 
   getBoundCardCount(): number {
     return this.boundCardCount;
+  }
+
+  getSafetyLatch(): ProfileSafetyPause | null {
+    return this.safetyPauseLatch;
   }
 
   setPolicy(policy: Partial<V01Policy>): void {

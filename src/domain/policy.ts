@@ -19,6 +19,22 @@ export interface V01Policy {
   profileEnrichmentEnabled: boolean;
 }
 
+export interface ProfileSafetyPause {
+  code: number | string;
+  reason: string;
+  detectedAt: number;
+}
+
+export const STORAGE_KEYS = {
+  CONTENT_KEYWORD: 'contentKeyword',
+  PREFERRED_REGIONS: 'preferredRegions',
+  KEEP_UNKNOWN_REGION: 'keepUnknownRegion',
+  ALLOWED_GENDERS: 'allowedGenders',
+  KEEP_UNKNOWN_GENDER: 'keepUnknownGender',
+  PROFILE_ENRICHMENT_ENABLED: 'profileEnrichmentEnabled',
+  PROFILE_SAFETY_PAUSE: 'profileSafetyPause',
+} as const;
+
 export const DEFAULT_POLICY: V01Policy = {
   contentKeyword: '',
   preferredRegions: ['广东'],

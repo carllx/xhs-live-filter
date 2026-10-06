@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xhs-live-filter
 // @namespace    https://github.com/carllx/xhs-live-filter
-// @version      0.1.3-beta.5
+// @version      0.1.3-beta.6
 // @description  小红书直播广场智能过滤器
 // @author       carllx
 // @match        https://www.xiaohongshu.com/*
@@ -221,6 +221,15 @@
   };
 
   // src/domain/policy.ts
+  var STORAGE_KEYS = {
+    CONTENT_KEYWORD: "contentKeyword",
+    PREFERRED_REGIONS: "preferredRegions",
+    KEEP_UNKNOWN_REGION: "keepUnknownRegion",
+    ALLOWED_GENDERS: "allowedGenders",
+    KEEP_UNKNOWN_GENDER: "keepUnknownGender",
+    PROFILE_ENRICHMENT_ENABLED: "profileEnrichmentEnabled",
+    PROFILE_SAFETY_PAUSE: "profileSafetyPause"
+  };
   var DEFAULT_POLICY = {
     contentKeyword: "",
     preferredRegions: ["\u5E7F\u4E1C"],
@@ -467,11 +476,15 @@
     state = "RUNNING";
     callbacks;
     isProbing = false;
+    pauseReason = "";
     constructor(callbacks) {
       this.callbacks = callbacks;
     }
     getState() {
       return this.state;
+    }
+    getReason() {
+      return this.pauseReason;
     }
     isPaused() {
       return this.state === "PAUSED";
@@ -481,6 +494,7 @@
      * @param reason 熔断触发原因
      */
     trip(reason) {
+      this.pauseReason = reason;
       if (this.state === "PAUSED") return;
       this.state = "PAUSED";
       console.warn(`[xhs-live-filter] CircuitBreaker TRIPPED to PAUSED: ${reason}`);
@@ -553,6 +567,17 @@
         localStorage.setItem(`xhs_filter_${key}`, JSON.stringify(value));
       } catch (e) {
         console.warn(`[xhs-live-filter] Write storage key '${key}' failed:`, e);
+      }
+    }
+    static remove(key) {
+      try {
+        if (this.isGMSupported()) {
+          GM_setValue(key, null);
+          return;
+        }
+        localStorage.removeItem(`xhs_filter_${key}`);
+      } catch (e) {
+        console.warn(`[xhs-live-filter] Remove storage key '${key}' failed:`, e);
       }
     }
   };
@@ -711,6 +736,31 @@
       }
       const url = `/user/profile/${userId}`;
       const { status, text } = await this.fetcher(url);
+      let is300013 = false;
+      let limitMsg = "";
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && (parsed.code === 300013 || parsed.code === "300013")) {
+          is300013 = true;
+          limitMsg = parsed.msg || parsed.message || "\u8BBF\u95EE\u9891\u6B21\u5F02\u5E38\uFF0C\u8BF7\u52FF\u9891\u7E41\u64CD\u4F5C\u6216\u91CD\u542F\u8BD5\u8BD5";
+        }
+      } catch {
+      }
+      if (!is300013 && text.includes("300013")) {
+        const hasRateLimitSemantic = text.includes("\u8BBF\u95EE\u9891\u6B21\u5F02\u5E38") || text.includes("\u8BBF\u95EE\u9891\u7387") || text.includes("Too many requests") || text.includes("Try again later");
+        if (hasRateLimitSemantic) {
+          is300013 = true;
+          limitMsg = "XHS 300013 rate limit";
+        }
+      }
+      if (is300013) {
+        const err = new Error(`XHS 300013 rate limit${limitMsg ? `: ${limitMsg}` : ""}`);
+        err.isSecurityStop = true;
+        err.isRateLimited = true;
+        err.code = 300013;
+        err.reason = "XHS 300013 rate limit";
+        throw err;
+      }
       if (status === 401 || status === 403) {
         const err = new Error(`HTTP ${status} Auth/Forbidden`);
         err.isSecurityStop = true;
@@ -1012,6 +1062,10 @@
     keywordInput;
     statsTextEl;
     recoverBtn;
+    pausedWarningEl;
+    pausedTitleEl;
+    pausedReasonEl;
+    pausedSubtextEl;
     events;
     isExpanded = false;
     // Policy UI elements
@@ -1138,9 +1192,13 @@
       </div>
 
       <!-- \u98CE\u63A7\u4FDD\u62A4\u8B66\u544A -->
-      <div class="paused-warning" style="display: none; padding: 6px 8px; background: #fffbe6; border: 1px solid #ffe58f; border-radius: 6px; font-size: 11px; color: #d46b08; margin-bottom: 8px; justify-content: space-between; align-items: center;">
-        <span>\u26A0\uFE0F \u5DF2\u6682\u505C \xB7 \u98CE\u63A7\u4FDD\u62A4</span>
-        <button class="recover-btn" style="padding: 2px 8px; background: #fa8c16; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">\u6062\u590D</button>
+      <div class="paused-warning" style="display: none; flex-direction: column; padding: 8px 10px; background: #fffbe6; border: 1px solid #ffe58f; border-radius: 6px; font-size: 11px; color: #d46b08; margin-bottom: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+          <span class="paused-title" style="font-weight: 600;">\u26A0\uFE0F \u533F\u540D\u5C5E\u5730\u8865\u5168\uFF1A\u5DF2\u6682\u505C</span>
+          <button class="recover-btn" style="padding: 2px 8px; background: #fa8c16; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; white-space: nowrap;">\u6062\u590D\u5E76\u5C1D\u8BD5\u4E00\u6B21</button>
+        </div>
+        <div class="paused-reason" style="font-size: 11px; color: #b35c00; margin-bottom: 2px;">\u539F\u56E0\uFF1A\u98CE\u63A7\u4FDD\u62A4\u62E6\u622A</div>
+        <div class="paused-subtext" style="font-size: 10px; color: #888;">\u63D2\u4EF6\u4E0D\u4F1A\u81EA\u52A8\u91CD\u8BD5\u3002</div>
       </div>
     `;
       this.container.appendChild(this.capsuleEl);
@@ -1150,6 +1208,10 @@
       const closeBtn = this.panelEl.querySelector(".panel-close-btn");
       this.statsTextEl = this.panelEl.querySelector(".stats-text");
       this.recoverBtn = this.panelEl.querySelector(".recover-btn");
+      this.pausedWarningEl = this.panelEl.querySelector(".paused-warning");
+      this.pausedTitleEl = this.panelEl.querySelector(".paused-title");
+      this.pausedReasonEl = this.panelEl.querySelector(".paused-reason");
+      this.pausedSubtextEl = this.panelEl.querySelector(".paused-subtext");
       this.femaleCheckbox = this.panelEl.querySelector(".gender-female");
       this.maleCheckbox = this.panelEl.querySelector(".gender-male");
       this.keepUnknownGenderCheckbox = this.panelEl.querySelector(".keep-unknown-gender");
@@ -1271,15 +1333,23 @@
         statsDetail += ` \xB7 \u6027\u522B\u7B5B\u9009\u672A\u751F\u6548 (Fail-Open)`;
       }
       this.statsTextEl.textContent = statsDetail;
-      const pausedEl = this.panelEl.querySelector(".paused-warning");
-      if (pausedEl) {
+      if (this.pausedWarningEl) {
         if (stats.isPaused) {
-          pausedEl.style.display = "flex";
+          this.pausedWarningEl.style.display = "flex";
           this.capsuleEl.style.background = "#fa8c16";
           const capsuleTitle = this.capsuleEl.querySelector(".capsule-title");
           if (capsuleTitle) capsuleTitle.textContent = "\u5DF2\u6682\u505C \xB7 \u98CE\u63A7\u4FDD\u62A4";
+          if (stats.pauseCode === 300013 || stats.pauseCode === "300013" || stats.pauseReason?.includes("300013")) {
+            this.pausedTitleEl.textContent = "\u26A0\uFE0F \u533F\u540D\u5C5E\u5730\u8865\u5168\uFF1A\u5DF2\u6682\u505C";
+            this.pausedReasonEl.textContent = "\u539F\u56E0\uFF1A\u5C0F\u7EA2\u4E66\u8FD4\u56DE 300013\uFF08\u8BBF\u95EE\u9891\u6B21\u9650\u5236\uFF09";
+            this.pausedSubtextEl.textContent = "\u63D2\u4EF6\u4E0D\u4F1A\u81EA\u52A8\u91CD\u8BD5\u3002";
+          } else if (stats.pauseReason) {
+            this.pausedTitleEl.textContent = "\u26A0\uFE0F \u533F\u540D\u5C5E\u5730\u8865\u5168\uFF1A\u5DF2\u6682\u505C";
+            this.pausedReasonEl.textContent = `\u539F\u56E0\uFF1A${stats.pauseReason}`;
+            this.pausedSubtextEl.textContent = "\u63D2\u4EF6\u4E0D\u4F1A\u81EA\u52A8\u91CD\u8BD5\u3002";
+          }
         } else {
-          pausedEl.style.display = "none";
+          this.pausedWarningEl.style.display = "none";
           this.capsuleEl.style.background = "#ff2442";
           const capsuleTitle = this.capsuleEl.querySelector(".capsule-title");
           if (capsuleTitle) capsuleTitle.textContent = "\u76F4\u64AD\u8FC7\u6EE4";
@@ -1309,13 +1379,18 @@
     identityStore;
     unsubscribeIdentityStore;
     boundCardCount = 0;
+    safetyPauseLatch = null;
     constructor(customFetcher, calibrationGate, customBreaker, identityStore, schedulerOptions, initialPolicy) {
-      const savedKeyword = StorageAdapter.get("contentKeyword", "");
-      const savedRegions = StorageAdapter.get("preferredRegions", DEFAULT_POLICY.preferredRegions);
-      const savedKeepUnknownRegion = StorageAdapter.get("keepUnknownRegion", DEFAULT_POLICY.keepUnknownRegion);
-      const savedGenders = StorageAdapter.get("allowedGenders", DEFAULT_POLICY.allowedGenders);
-      const savedKeepUnknownGender = StorageAdapter.get("keepUnknownGender", DEFAULT_POLICY.keepUnknownGender);
-      const savedEnrichmentEnabled = StorageAdapter.get("profileEnrichmentEnabled", DEFAULT_POLICY.profileEnrichmentEnabled);
+      const savedKeyword = StorageAdapter.get(STORAGE_KEYS.CONTENT_KEYWORD, "");
+      const savedRegions = StorageAdapter.get(STORAGE_KEYS.PREFERRED_REGIONS, DEFAULT_POLICY.preferredRegions);
+      const savedKeepUnknownRegion = StorageAdapter.get(STORAGE_KEYS.KEEP_UNKNOWN_REGION, DEFAULT_POLICY.keepUnknownRegion);
+      const savedGenders = StorageAdapter.get(STORAGE_KEYS.ALLOWED_GENDERS, DEFAULT_POLICY.allowedGenders);
+      const savedKeepUnknownGender = StorageAdapter.get(STORAGE_KEYS.KEEP_UNKNOWN_GENDER, DEFAULT_POLICY.keepUnknownGender);
+      this.safetyPauseLatch = StorageAdapter.get(STORAGE_KEYS.PROFILE_SAFETY_PAUSE, null);
+      let savedEnrichmentEnabled = StorageAdapter.get(STORAGE_KEYS.PROFILE_ENRICHMENT_ENABLED, DEFAULT_POLICY.profileEnrichmentEnabled);
+      if (this.safetyPauseLatch) {
+        savedEnrichmentEnabled = false;
+      }
       this.policy = {
         contentKeyword: savedKeyword,
         preferredRegions: savedRegions,
@@ -1326,6 +1401,9 @@
         profileEnrichmentEnabled: savedEnrichmentEnabled,
         ...initialPolicy
       };
+      if (this.safetyPauseLatch && !initialPolicy?.profileEnrichmentEnabled) {
+        this.policy.profileEnrichmentEnabled = false;
+      }
       this.cache = new ProfileCache();
       this.fetcher = customFetcher || new ProfileFetcher();
       this.calibrationGate = calibrationGate || new GenderCalibrationGate();
@@ -1347,6 +1425,9 @@
         this.policy
       );
       this.ui.setCalibrationStatus(this.calibrationGate.getStatus());
+      if (this.safetyPauseLatch) {
+        this.breaker.trip(this.safetyPauseLatch.reason || "XHS 300013 rate limit");
+      }
       this.observer = new CardObserver({
         onCardDiscovered: (card) => this.handleCardDiscovered(card)
       });
@@ -1410,6 +1491,12 @@
       if (!this.policy.profileEnrichmentEnabled) {
         return false;
       }
+      if (this.safetyPauseLatch) {
+        return false;
+      }
+      if (this.breaker.isPaused()) {
+        return false;
+      }
       const hasRegionFilter = this.policy.preferredRegions.length > 0;
       const isGenderCalibrated = this.calibrationGate.getStatus() === "CALIBRATED";
       return hasRegionFilter || isGenderCalibrated;
@@ -1458,10 +1545,23 @@
             const isSecurityStop = err?.isSecurityStop;
             const isRateLimited = err?.isRateLimited;
             const isVerification = err?.isVerification;
+            const errCode = err?.code;
             const reason = err?.reason || (isRateLimited ? "HTTP 429 \u9650\u6D41" : isVerification ? "\u51FA\u73B0\u9A8C\u8BC1\u7801\u91CD\u5B9A\u5411" : "\u5B89\u5168\u62E6\u622A");
             if (isSecurityStop || isRateLimited || isVerification) {
               ProfileFetcher.recordPaused(reason);
+              if (errCode === 300013 || errCode === "300013" || reason.includes("300013")) {
+                this.safetyPauseLatch = {
+                  code: 300013,
+                  reason: "XHS 300013 rate limit",
+                  detectedAt: Date.now()
+                };
+                StorageAdapter.set(STORAGE_KEYS.PROFILE_SAFETY_PAUSE, this.safetyPauseLatch);
+              }
+              this.policy.profileEnrichmentEnabled = false;
+              StorageAdapter.set(STORAGE_KEYS.PROFILE_ENRICHMENT_ENABLED, false);
+              this.scheduler.clearPendingQueue();
               this.breaker.trip(reason);
+              this.ui.syncPolicyToUI(this.policy);
             } else {
               console.warn(`[xhs-live-filter] Enrich user failed (ordinary fail-open):`, err);
             }
@@ -1473,17 +1573,17 @@
     }
     handleKeywordChange(keyword) {
       this.policy.contentKeyword = keyword;
-      StorageAdapter.set("contentKeyword", keyword);
+      StorageAdapter.set(STORAGE_KEYS.CONTENT_KEYWORD, keyword);
       this.refreshAll();
     }
     handlePolicyChange(partialPolicy) {
       const wasEnrichmentNeeded = this.isEnrichmentNeeded();
       this.policy = { ...this.policy, ...partialPolicy };
-      StorageAdapter.set("allowedGenders", this.policy.allowedGenders);
-      StorageAdapter.set("keepUnknownGender", this.policy.keepUnknownGender);
-      StorageAdapter.set("preferredRegions", this.policy.preferredRegions);
-      StorageAdapter.set("keepUnknownRegion", this.policy.keepUnknownRegion);
-      StorageAdapter.set("profileEnrichmentEnabled", this.policy.profileEnrichmentEnabled);
+      StorageAdapter.set(STORAGE_KEYS.ALLOWED_GENDERS, this.policy.allowedGenders);
+      StorageAdapter.set(STORAGE_KEYS.KEEP_UNKNOWN_GENDER, this.policy.keepUnknownGender);
+      StorageAdapter.set(STORAGE_KEYS.PREFERRED_REGIONS, this.policy.preferredRegions);
+      StorageAdapter.set(STORAGE_KEYS.KEEP_UNKNOWN_REGION, this.policy.keepUnknownRegion);
+      StorageAdapter.set(STORAGE_KEYS.PROFILE_ENRICHMENT_ENABLED, this.policy.profileEnrichmentEnabled);
       if (!this.policy.profileEnrichmentEnabled) {
         this.scheduler.clearPendingQueue();
       } else if (!wasEnrichmentNeeded && this.isEnrichmentNeeded()) {
@@ -1505,6 +1605,11 @@
           }
         }
         if (!targetUserId) {
+          this.safetyPauseLatch = null;
+          StorageAdapter.remove(STORAGE_KEYS.PROFILE_SAFETY_PAUSE);
+          this.policy.profileEnrichmentEnabled = false;
+          StorageAdapter.set(STORAGE_KEYS.PROFILE_ENRICHMENT_ENABLED, false);
+          this.ui.syncPolicyToUI(this.policy);
           return true;
         }
         try {
@@ -1517,11 +1622,26 @@
               this.applyCardEvaluation(info, facts);
             }
           }
+          this.safetyPauseLatch = null;
+          StorageAdapter.remove(STORAGE_KEYS.PROFILE_SAFETY_PAUSE);
+          this.policy.profileEnrichmentEnabled = false;
+          StorageAdapter.set(STORAGE_KEYS.PROFILE_ENRICHMENT_ENABLED, false);
+          this.ui.syncPolicyToUI(this.policy);
           return true;
         } catch (err) {
           const isSecurityStop = err?.isSecurityStop;
           const isRateLimited = err?.isRateLimited;
           const isVerification = err?.isVerification;
+          const errCode = err?.code;
+          const reason = err?.reason || "\u5B89\u5168\u62E6\u622A";
+          if (errCode === 300013 || errCode === "300013" || reason.includes("300013")) {
+            this.safetyPauseLatch = {
+              code: 300013,
+              reason: "XHS 300013 rate limit",
+              detectedAt: Date.now()
+            };
+            StorageAdapter.set(STORAGE_KEYS.PROFILE_SAFETY_PAUSE, this.safetyPauseLatch);
+          }
           if (isSecurityStop || isRateLimited || isVerification) {
             return false;
           }
@@ -1561,11 +1681,14 @@
           visibleCount++;
         }
       }
+      const isPaused = this.breaker.isPaused() || !!this.safetyPauseLatch;
       const stats = {
         totalCards: this.cards.size,
         visibleCards: visibleCount,
         filteredCards: this.cards.size - visibleCount,
-        isPaused: this.breaker.isPaused()
+        isPaused,
+        pauseReason: this.safetyPauseLatch?.reason || this.breaker.getReason(),
+        pauseCode: this.safetyPauseLatch?.code
       };
       this.ui.updateStats(stats);
     }
@@ -1599,6 +1722,9 @@
     }
     getBoundCardCount() {
       return this.boundCardCount;
+    }
+    getSafetyLatch() {
+      return this.safetyPauseLatch;
     }
     setPolicy(policy) {
       this.handlePolicyChange(policy);
@@ -1767,7 +1893,7 @@
     window.__XHS_LIVE_FILTER_LOADED__ = true;
     const app = new LiveFilterApp();
     app.start(document.body);
-    console.log("[xhs-live-filter] v0.1.3-beta.5 candidate started successfully");
+    console.log("[xhs-live-filter] v0.1.3-beta.6 candidate started successfully");
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", bootstrap, { once: true });

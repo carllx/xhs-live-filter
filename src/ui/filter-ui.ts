@@ -17,6 +17,8 @@ export interface UIStats {
   visibleCards: number;
   filteredCards: number;
   isPaused?: boolean;
+  pauseReason?: string;
+  pauseCode?: number | string;
 }
 
 export class FilterUI {
@@ -26,6 +28,10 @@ export class FilterUI {
   private keywordInput: HTMLInputElement;
   private statsTextEl: HTMLElement;
   private recoverBtn: HTMLButtonElement;
+  private pausedWarningEl!: HTMLElement;
+  private pausedTitleEl!: HTMLElement;
+  private pausedReasonEl!: HTMLElement;
+  private pausedSubtextEl!: HTMLElement;
   private events: FilterUIEvents;
   private isExpanded: boolean = false;
 
@@ -158,9 +164,13 @@ export class FilterUI {
       </div>
 
       <!-- 风控保护警告 -->
-      <div class="paused-warning" style="display: none; padding: 6px 8px; background: #fffbe6; border: 1px solid #ffe58f; border-radius: 6px; font-size: 11px; color: #d46b08; margin-bottom: 8px; justify-content: space-between; align-items: center;">
-        <span>⚠️ 已暂停 · 风控保护</span>
-        <button class="recover-btn" style="padding: 2px 8px; background: #fa8c16; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">恢复</button>
+      <div class="paused-warning" style="display: none; flex-direction: column; padding: 8px 10px; background: #fffbe6; border: 1px solid #ffe58f; border-radius: 6px; font-size: 11px; color: #d46b08; margin-bottom: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+          <span class="paused-title" style="font-weight: 600;">⚠️ 匿名属地补全：已暂停</span>
+          <button class="recover-btn" style="padding: 2px 8px; background: #fa8c16; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; white-space: nowrap;">恢复并尝试一次</button>
+        </div>
+        <div class="paused-reason" style="font-size: 11px; color: #b35c00; margin-bottom: 2px;">原因：风控保护拦截</div>
+        <div class="paused-subtext" style="font-size: 10px; color: #888;">插件不会自动重试。</div>
       </div>
     `;
 
@@ -173,6 +183,10 @@ export class FilterUI {
     const closeBtn = this.panelEl.querySelector('.panel-close-btn') as HTMLButtonElement;
     this.statsTextEl = this.panelEl.querySelector('.stats-text') as HTMLElement;
     this.recoverBtn = this.panelEl.querySelector('.recover-btn') as HTMLButtonElement;
+    this.pausedWarningEl = this.panelEl.querySelector('.paused-warning') as HTMLElement;
+    this.pausedTitleEl = this.panelEl.querySelector('.paused-title') as HTMLElement;
+    this.pausedReasonEl = this.panelEl.querySelector('.paused-reason') as HTMLElement;
+    this.pausedSubtextEl = this.panelEl.querySelector('.paused-subtext') as HTMLElement;
 
     this.femaleCheckbox = this.panelEl.querySelector('.gender-female') as HTMLInputElement;
     this.maleCheckbox = this.panelEl.querySelector('.gender-male') as HTMLInputElement;
@@ -319,15 +333,24 @@ export class FilterUI {
     }
     this.statsTextEl.textContent = statsDetail;
 
-    const pausedEl = this.panelEl.querySelector('.paused-warning') as HTMLElement;
-    if (pausedEl) {
+    if (this.pausedWarningEl) {
       if (stats.isPaused) {
-        pausedEl.style.display = 'flex';
+        this.pausedWarningEl.style.display = 'flex';
         this.capsuleEl.style.background = '#fa8c16';
         const capsuleTitle = this.capsuleEl.querySelector('.capsule-title');
         if (capsuleTitle) capsuleTitle.textContent = '已暂停 · 风控保护';
+
+        if (stats.pauseCode === 300013 || stats.pauseCode === '300013' || stats.pauseReason?.includes('300013')) {
+          this.pausedTitleEl.textContent = '⚠️ 匿名属地补全：已暂停';
+          this.pausedReasonEl.textContent = '原因：小红书返回 300013（访问频次限制）';
+          this.pausedSubtextEl.textContent = '插件不会自动重试。';
+        } else if (stats.pauseReason) {
+          this.pausedTitleEl.textContent = '⚠️ 匿名属地补全：已暂停';
+          this.pausedReasonEl.textContent = `原因：${stats.pauseReason}`;
+          this.pausedSubtextEl.textContent = '插件不会自动重试。';
+        }
       } else {
-        pausedEl.style.display = 'none';
+        this.pausedWarningEl.style.display = 'none';
         this.capsuleEl.style.background = '#ff2442';
         const capsuleTitle = this.capsuleEl.querySelector('.capsule-title');
         if (capsuleTitle) capsuleTitle.textContent = '直播过滤';

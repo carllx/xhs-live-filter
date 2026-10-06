@@ -117,6 +117,42 @@ export class ProfileFetcher {
     const url = `/user/profile/${userId}`;
     const { status, text } = await this.fetcher(url);
 
+    // 严格风控与业务级限流判定 (XHS 300013 Rate Limit):
+    // 1. 优先解析 JSON: code === 300013
+    let is300013 = false;
+    let limitMsg = '';
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && (parsed.code === 300013 || parsed.code === '300013')) {
+        is300013 = true;
+        limitMsg = parsed.msg || parsed.message || '访问频次异常，请勿频繁操作或重启试试';
+      }
+    } catch {
+      // 忽略非 JSON 格式
+    }
+
+    // 2. HTML/text fallback: 必须同时满足 contains "300013" AND 至少一个 rate-limit 语义词
+    if (!is300013 && text.includes('300013')) {
+      const hasRateLimitSemantic =
+        text.includes('访问频次异常') ||
+        text.includes('访问频率') ||
+        text.includes('Too many requests') ||
+        text.includes('Try again later');
+      if (hasRateLimitSemantic) {
+        is300013 = true;
+        limitMsg = 'XHS 300013 rate limit';
+      }
+    }
+
+    if (is300013) {
+      const err = new Error(`XHS 300013 rate limit${limitMsg ? `: ${limitMsg}` : ''}`);
+      (err as { isSecurityStop?: boolean; isRateLimited?: boolean; code?: number | string; reason?: string }).isSecurityStop = true;
+      (err as { isSecurityStop?: boolean; isRateLimited?: boolean; code?: number | string; reason?: string }).isRateLimited = true;
+      (err as { isSecurityStop?: boolean; isRateLimited?: boolean; code?: number | string; reason?: string }).code = 300013;
+      (err as { isSecurityStop?: boolean; isRateLimited?: boolean; code?: number | string; reason?: string }).reason = 'XHS 300013 rate limit';
+      throw err;
+    }
+
     // 严格风控与登录拦截判定 (ADR / Safety Hardening):
     // 遇到 HTTP 401, 403, 429, 验证码、登录页重定向或登录弹窗墙立即触发安全停止
     if (status === 401 || status === 403) {
@@ -129,7 +165,7 @@ export class ProfileFetcher {
     if (status === 429) {
       const err = new Error(`HTTP 429 Too Many Requests`);
       (err as { isRateLimited?: boolean; isSecurityStop?: boolean; reason?: string }).isRateLimited = true;
-      (err as { isRateLimited?: boolean; isSecurityStop?: boolean; reason?: string }).isSecurityStop = true;
+      (err as { isSecurityStop?: boolean; reason?: string }).isSecurityStop = true;
       (err as { isRateLimited?: boolean; isSecurityStop?: boolean; reason?: string }).reason = 'HTTP 429';
       throw err;
     }

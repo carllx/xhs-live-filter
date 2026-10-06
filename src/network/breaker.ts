@@ -14,6 +14,7 @@ export class CircuitBreaker {
   private state: BreakerState = 'RUNNING';
   private callbacks: BreakerCallbacks;
   private isProbing: boolean = false;
+  private pauseReason: string = '';
 
   constructor(callbacks: BreakerCallbacks) {
     this.callbacks = callbacks;
@@ -21,6 +22,10 @@ export class CircuitBreaker {
 
   getState(): BreakerState {
     return this.state;
+  }
+
+  getReason(): string {
+    return this.pauseReason;
   }
 
   isPaused(): boolean {
@@ -32,6 +37,7 @@ export class CircuitBreaker {
    * @param reason 熔断触发原因
    */
   trip(reason: string): void {
+    this.pauseReason = reason;
     if (this.state === 'PAUSED') return;
     this.state = 'PAUSED';
     console.warn(`[xhs-live-filter] CircuitBreaker TRIPPED to PAUSED: ${reason}`);
