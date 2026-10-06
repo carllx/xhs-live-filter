@@ -6,6 +6,7 @@ export interface ExtractedCardInfo {
   cardElement: HTMLElement;
   title: string;
   nickname: string;
+  liveId?: string;
   userId?: string;
 }
 
@@ -16,7 +17,7 @@ export function extractCardInfo(cardElement: HTMLElement): ExtractedCardInfo {
   if (titleEl) {
     title = titleEl.getAttribute('title') || titleEl.textContent || '';
   } else {
-    const linkEl = cardElement.querySelector('a[href*="/live/"]');
+    const linkEl = cardElement.querySelector('a[href*="/live/"], a[href*="/livestream/"]');
     if (linkEl) {
       title = linkEl.getAttribute('title') || linkEl.textContent || '';
     } else {
@@ -34,7 +35,19 @@ export function extractCardInfo(cardElement: HTMLElement): ExtractedCardInfo {
     nickname = authorEl.textContent || '';
   }
 
-  // 3. 提取 Anchor userId (从主页链接提取)
+  // 3. 提取 liveId (从 /livestream/{liveId} 或 /live/{liveId} 提取)
+  let liveId: string | undefined = undefined;
+  const liveLinks = cardElement.querySelectorAll('a[href*="/livestream/"], a[href*="/live/"]');
+  for (const link of Array.from(liveLinks)) {
+    const href = link.getAttribute('href') || '';
+    const match = href.match(/\/(?:livestream|live)\/([0-9a-zA-Z_-]+)/);
+    if (match && match[1]) {
+      liveId = match[1];
+      break;
+    }
+  }
+
+  // 4. 提取 Anchor userId (从主页链接提取，作为兼容 fallback)
   let userId: string | undefined = undefined;
   const userLinks = cardElement.querySelectorAll('a[href*="/user/profile/"], a[href*="/user/"]');
   for (const link of Array.from(userLinks)) {
@@ -46,7 +59,7 @@ export function extractCardInfo(cardElement: HTMLElement): ExtractedCardInfo {
     }
   }
 
-  // 4. 支持 data-user-id 属性回退
+  // 5. 支持 data-user-id 属性回退
   if (!userId) {
     const dataUserId = cardElement.getAttribute('data-user-id') || cardElement.querySelector('[data-user-id]')?.getAttribute('data-user-id');
     if (dataUserId) {
@@ -58,6 +71,7 @@ export function extractCardInfo(cardElement: HTMLElement): ExtractedCardInfo {
     cardElement,
     title: title.trim(),
     nickname: nickname.trim(),
+    liveId: liveId?.trim() || undefined,
     userId: userId?.trim() || undefined,
   };
 }

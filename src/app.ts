@@ -12,6 +12,7 @@ import { CardPresenter } from './dom/card-presenter';
 import { CircuitBreaker } from './network/breaker';
 import { ProfileCache } from './network/cache';
 import { ProfileFetcher } from './network/profile-fetcher';
+import { FeedIdentityStore, FeedIdentity } from './network/feed-identity-store';
 import { ViewportScheduler } from './network/viewport-scheduler';
 import { StorageAdapter } from './storage/storage';
 import { FilterUI, UIStats } from './ui/filter-ui';
@@ -27,11 +28,15 @@ export class LiveFilterApp {
   private calibrationGate: GenderCalibrationGate;
   private breaker: CircuitBreaker;
   private scheduler: ViewportScheduler;
+  private identityStore: FeedIdentityStore;
+  private unsubscribeIdentityStore?: () => void;
+  private boundCardCount = 0;
 
   constructor(
     customFetcher?: ProfileFetcher,
     calibrationGate?: GenderCalibrationGate,
-    customBreaker?: CircuitBreaker
+    customBreaker?: CircuitBreaker,
+    identityStore?: FeedIdentityStore
   ) {
     // 读取持久化策略
     const savedKeyword = StorageAdapter.get<string>('contentKeyword', '');
@@ -52,6 +57,12 @@ export class LiveFilterApp {
     this.cache = new ProfileCache();
     this.fetcher = customFetcher || new ProfileFetcher();
     this.calibrationGate = calibrationGate || new GenderCalibrationGate();
+    this.identityStore = identityStore || FeedIdentityStore.getInstance();
+
+    // 订阅 FeedIdentityStore 的新身份到来（Late-Binding: Card 先出现，Squarefeed 后到）
+    this.unsubscribeIdentityStore = this.identityStore.onIdentityAdded((identity) => {
+      this.handleLateIdentityBound(identity);
+    });
 
     this.breaker =
       customBreaker ||
@@ -86,6 +97,10 @@ export class LiveFilterApp {
   }
 
   destroy(): void {
+    if (this.unsubscribeIdentityStore) {
+      this.unsubscribeIdentityStore();
+      this.unsubscribeIdentityStore = undefined;
+    }
     this.observer.stop();
     this.scheduler.destroy();
     this.cards.clear();
@@ -95,30 +110,67 @@ export class LiveFilterApp {
   private handleCardDiscovered(cardElement: HTMLElement): void {
     if (this.cards.has(cardElement)) return;
     const info = extractCardInfo(cardElement);
+
+    // Case A: Squarefeed 先到，Identity Map 中已有该 liveId -> 立即绑定
+    if (!info.userId && info.liveId && this.identityStore.has(info.liveId)) {
+      const idRecord = this.identityStore.getIdentity(info.liveId);
+      if (idRecord) {
+        info.userId = idRecord.userId;
+        if (!info.nickname && idRecord.nickname) info.nickname = idRecord.nickname;
+        if (!info.title && idRecord.title) info.title = idRecord.title;
+        this.boundCardCount++;
+        console.log(`[xhs-live-filter] card identity bound: liveId=${info.liveId}`);
+      }
+    }
+
     this.cards.set(cardElement, info);
 
     // 视口观察器挂载
     this.scheduler.observeCard(cardElement);
 
-    // 初始呈现（根据已有已知事实）
+    // 初始呈现与数据调度
     if (!info.userId) {
+      // 身份尚未就绪（等待 Case B late binding）
       const unknownFacts = createUnknownFacts();
       this.applyCardEvaluation(info, unknownFacts);
     } else {
-      const cached = this.cache.get(info.userId);
-      if (cached) {
-        cached.gender = this.calibrationGate.normalize(cached.rawGender);
-        this.factsMap.set(info.userId, cached);
-        this.applyCardEvaluation(info, cached);
-      } else {
-        // 未缓存时先按 unknown 呈现并加入调度排队
-        const initialUnknown = createUnknownFacts(info.userId);
-        this.applyCardEvaluation(info, initialUnknown);
-        this.enqueueEnrichment(info.userId, cardElement);
-      }
+      this.processCardWithUserId(info);
     }
 
     this.updateStats();
+  }
+
+  /**
+   * Late Binding (Case B): Card 先出现，Squarefeed 后到
+   */
+  private handleLateIdentityBound(identity: FeedIdentity): void {
+    for (const info of this.cards.values()) {
+      if (info.liveId === identity.liveId && !info.userId) {
+        info.userId = identity.userId;
+        if (!info.nickname && identity.nickname) info.nickname = identity.nickname;
+        if (!info.title && identity.title) info.title = identity.title;
+        this.boundCardCount++;
+        console.log(`[xhs-live-filter] card identity bound: liveId=${identity.liveId}`);
+
+        // 绑定成功，执行视口调度与呈现
+        this.processCardWithUserId(info);
+      }
+    }
+    this.updateStats();
+  }
+
+  private processCardWithUserId(info: ExtractedCardInfo): void {
+    if (!info.userId) return;
+    const cached = this.cache.get(info.userId);
+    if (cached) {
+      cached.gender = this.calibrationGate.normalize(cached.rawGender);
+      this.factsMap.set(info.userId, cached);
+      this.applyCardEvaluation(info, cached);
+    } else {
+      const initialUnknown = createUnknownFacts(info.userId);
+      this.applyCardEvaluation(info, initialUnknown);
+      this.enqueueEnrichment(info.userId, info.cardElement);
+    }
   }
 
   private enqueueEnrichment(userId: string, cardElement: HTMLElement): void {
@@ -291,6 +343,14 @@ export class LiveFilterApp {
 
   getScheduler(): ViewportScheduler {
     return this.scheduler;
+  }
+
+  getIdentityStore(): FeedIdentityStore {
+    return this.identityStore;
+  }
+
+  getBoundCardCount(): number {
+    return this.boundCardCount;
   }
 
   setPolicy(policy: Partial<V01Policy>): void {

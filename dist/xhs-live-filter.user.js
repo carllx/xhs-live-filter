@@ -8,11 +8,13 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @connect      xiaohongshu.com
 // @connect      edith.xiaohongshu.com
+// @connect      live-room.xiaohongshu.com
 // @updateURL    https://raw.githubusercontent.com/carllx/xhs-live-filter/main/dist/xhs-live-filter.user.js
 // @downloadURL  https://raw.githubusercontent.com/carllx/xhs-live-filter/main/dist/xhs-live-filter.user.js
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 "use strict";
@@ -148,7 +150,7 @@
     if (titleEl) {
       title = titleEl.getAttribute("title") || titleEl.textContent || "";
     } else {
-      const linkEl = cardElement.querySelector('a[href*="/live/"]');
+      const linkEl = cardElement.querySelector('a[href*="/live/"], a[href*="/livestream/"]');
       if (linkEl) {
         title = linkEl.getAttribute("title") || linkEl.textContent || "";
       } else {
@@ -162,6 +164,16 @@
     const authorEl = cardElement.querySelector('.author-name, [class*="author"], [class*="nickname"], [class*="user-name"]');
     if (authorEl) {
       nickname = authorEl.textContent || "";
+    }
+    let liveId = void 0;
+    const liveLinks = cardElement.querySelectorAll('a[href*="/livestream/"], a[href*="/live/"]');
+    for (const link of Array.from(liveLinks)) {
+      const href = link.getAttribute("href") || "";
+      const match = href.match(/\/(?:livestream|live)\/([0-9a-zA-Z_-]+)/);
+      if (match && match[1]) {
+        liveId = match[1];
+        break;
+      }
     }
     let userId = void 0;
     const userLinks = cardElement.querySelectorAll('a[href*="/user/profile/"], a[href*="/user/"]');
@@ -183,6 +195,7 @@
       cardElement,
       title: title.trim(),
       nickname: nickname.trim(),
+      liveId: liveId?.trim() || void 0,
       userId: userId?.trim() || void 0
     };
   }
@@ -597,6 +610,65 @@
         age: "unknown",
         enriched: true
       };
+    }
+  };
+
+  // src/network/feed-identity-store.ts
+  var FeedIdentityStore = class _FeedIdentityStore {
+    static instance;
+    identities = /* @__PURE__ */ new Map();
+    // liveId -> FeedIdentity
+    listeners = /* @__PURE__ */ new Set();
+    capturedFeedCount = 0;
+    static getInstance() {
+      if (!_FeedIdentityStore.instance) {
+        _FeedIdentityStore.instance = new _FeedIdentityStore();
+      }
+      return _FeedIdentityStore.instance;
+    }
+    /**
+     * 注册新身份监听器（用于 late-binding 关联卡片）
+     */
+    onIdentityAdded(listener) {
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    /**
+     * 存入解析好的身份信息，若为新 liveId 则触发监听通知
+     */
+    addIdentity(identity) {
+      if (!identity.liveId || !identity.userId) return;
+      const isNew = !this.identities.has(identity.liveId);
+      this.identities.set(identity.liveId, identity);
+      if (isNew) {
+        for (const listener of this.listeners) {
+          try {
+            listener(identity);
+          } catch (e) {
+            console.warn("[xhs-live-filter] Identity listener error:", e);
+          }
+        }
+      }
+    }
+    getIdentity(liveId) {
+      return this.identities.get(liveId);
+    }
+    has(liveId) {
+      return this.identities.has(liveId);
+    }
+    incrementCapturedCount(count) {
+      this.capturedFeedCount += count;
+    }
+    // Diagnostics 只读统计
+    getCapturedFeedCount() {
+      return this.capturedFeedCount;
+    }
+    getIdentityMapSize() {
+      return this.identities.size;
+    }
+    clear() {
+      this.identities.clear();
+      this.capturedFeedCount = 0;
     }
   };
 
@@ -1023,7 +1095,10 @@
     calibrationGate;
     breaker;
     scheduler;
-    constructor(customFetcher, calibrationGate, customBreaker) {
+    identityStore;
+    unsubscribeIdentityStore;
+    boundCardCount = 0;
+    constructor(customFetcher, calibrationGate, customBreaker, identityStore) {
       const savedKeyword = StorageAdapter.get("contentKeyword", "");
       const savedRegions = StorageAdapter.get("preferredRegions", DEFAULT_POLICY.preferredRegions);
       const savedKeepUnknownRegion = StorageAdapter.get("keepUnknownRegion", DEFAULT_POLICY.keepUnknownRegion);
@@ -1040,6 +1115,10 @@
       this.cache = new ProfileCache();
       this.fetcher = customFetcher || new ProfileFetcher();
       this.calibrationGate = calibrationGate || new GenderCalibrationGate();
+      this.identityStore = identityStore || FeedIdentityStore.getInstance();
+      this.unsubscribeIdentityStore = this.identityStore.onIdentityAdded((identity) => {
+        this.handleLateIdentityBound(identity);
+      });
       this.breaker = customBreaker || new CircuitBreaker({
         onStateChange: () => this.updateStats()
       });
@@ -1065,6 +1144,10 @@
       this.refreshAll();
     }
     destroy() {
+      if (this.unsubscribeIdentityStore) {
+        this.unsubscribeIdentityStore();
+        this.unsubscribeIdentityStore = void 0;
+      }
       this.observer.stop();
       this.scheduler.destroy();
       this.cards.clear();
@@ -1073,24 +1156,54 @@
     handleCardDiscovered(cardElement) {
       if (this.cards.has(cardElement)) return;
       const info = extractCardInfo(cardElement);
+      if (!info.userId && info.liveId && this.identityStore.has(info.liveId)) {
+        const idRecord = this.identityStore.getIdentity(info.liveId);
+        if (idRecord) {
+          info.userId = idRecord.userId;
+          if (!info.nickname && idRecord.nickname) info.nickname = idRecord.nickname;
+          if (!info.title && idRecord.title) info.title = idRecord.title;
+          this.boundCardCount++;
+          console.log(`[xhs-live-filter] card identity bound: liveId=${info.liveId}`);
+        }
+      }
       this.cards.set(cardElement, info);
       this.scheduler.observeCard(cardElement);
       if (!info.userId) {
         const unknownFacts = createUnknownFacts();
         this.applyCardEvaluation(info, unknownFacts);
       } else {
-        const cached = this.cache.get(info.userId);
-        if (cached) {
-          cached.gender = this.calibrationGate.normalize(cached.rawGender);
-          this.factsMap.set(info.userId, cached);
-          this.applyCardEvaluation(info, cached);
-        } else {
-          const initialUnknown = createUnknownFacts(info.userId);
-          this.applyCardEvaluation(info, initialUnknown);
-          this.enqueueEnrichment(info.userId, cardElement);
+        this.processCardWithUserId(info);
+      }
+      this.updateStats();
+    }
+    /**
+     * Late Binding (Case B): Card 先出现，Squarefeed 后到
+     */
+    handleLateIdentityBound(identity) {
+      for (const info of this.cards.values()) {
+        if (info.liveId === identity.liveId && !info.userId) {
+          info.userId = identity.userId;
+          if (!info.nickname && identity.nickname) info.nickname = identity.nickname;
+          if (!info.title && identity.title) info.title = identity.title;
+          this.boundCardCount++;
+          console.log(`[xhs-live-filter] card identity bound: liveId=${identity.liveId}`);
+          this.processCardWithUserId(info);
         }
       }
       this.updateStats();
+    }
+    processCardWithUserId(info) {
+      if (!info.userId) return;
+      const cached = this.cache.get(info.userId);
+      if (cached) {
+        cached.gender = this.calibrationGate.normalize(cached.rawGender);
+        this.factsMap.set(info.userId, cached);
+        this.applyCardEvaluation(info, cached);
+      } else {
+        const initialUnknown = createUnknownFacts(info.userId);
+        this.applyCardEvaluation(info, initialUnknown);
+        this.enqueueEnrichment(info.userId, info.cardElement);
+      }
     }
     enqueueEnrichment(userId, cardElement) {
       this.scheduler.enqueue({
@@ -1233,23 +1346,156 @@
     getScheduler() {
       return this.scheduler;
     }
+    getIdentityStore() {
+      return this.identityStore;
+    }
+    getBoundCardCount() {
+      return this.boundCardCount;
+    }
     setPolicy(policy) {
       this.handlePolicyChange(policy);
     }
   };
 
+  // src/network/squarefeed-interceptor.ts
+  var SQUAREFEED_HOST = "live-room.xiaohongshu.com";
+  var SQUAREFEED_PATH = "/api/sns/red/live/web/feed/v1/squarefeed";
+  function isSquarefeedUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== "string") return false;
+    try {
+      const url = new URL(rawUrl, typeof window !== "undefined" ? window.location?.href : "https://www.xiaohongshu.com");
+      const isTargetHost = url.hostname === SQUAREFEED_HOST || url.hostname.endsWith("." + SQUAREFEED_HOST);
+      const isTargetPath = url.pathname === SQUAREFEED_PATH;
+      return isTargetHost && isTargetPath;
+    } catch {
+      return rawUrl.includes(SQUAREFEED_HOST) && rawUrl.includes(SQUAREFEED_PATH);
+    }
+  }
+  function processSquarefeedPayload(payload, store = FeedIdentityStore.getInstance()) {
+    if (!payload || typeof payload !== "object") return;
+    const dataObj = payload;
+    const feeds = Array.isArray(dataObj.data?.feeds) ? dataObj.data.feeds : Array.isArray(dataObj.feeds) ? dataObj.feeds : null;
+    if (!feeds || feeds.length === 0) return;
+    store.incrementCapturedCount(feeds.length);
+    let parsedCount = 0;
+    for (const item of feeds) {
+      if (!item || typeof item !== "object") continue;
+      const feed = item;
+      const roomInfo = feed.live?.tRoomInfo;
+      const hostInfo = feed.live?.tLiveHostInfo;
+      const liveId = (roomInfo?.roomIdStr ?? roomInfo?.roomId ?? "").toString().trim();
+      const userId = (hostInfo?.userId ?? "").toString().trim();
+      const nickname = (hostInfo?.nickname ?? "").toString().trim();
+      const title = (roomInfo?.name ?? "").toString().trim();
+      if (liveId && userId) {
+        store.addIdentity({
+          liveId,
+          userId,
+          nickname,
+          title
+        });
+        parsedCount++;
+      }
+    }
+    console.log(`[xhs-live-filter] squarefeed captured: feeds=${feeds.length}, identities=${parsedCount}`);
+  }
+  function installSquarefeedInterceptor(targetWindow, store = FeedIdentityStore.getInstance()) {
+    const resolvedWindow = targetWindow ?? (typeof unsafeWindow !== "undefined" ? unsafeWindow : typeof window !== "undefined" ? window : void 0);
+    if (!resolvedWindow) return;
+    const win = resolvedWindow;
+    if (!win || win.__XHS_SQUAREFEED_INTERCEPTOR_INSTALLED__) {
+      return;
+    }
+    win.__XHS_SQUAREFEED_INTERCEPTOR_INSTALLED__ = true;
+    const originalFetch = win.fetch;
+    if (typeof originalFetch === "function") {
+      win.fetch = async function(...args) {
+        const response = await originalFetch.apply(this, args);
+        try {
+          const input = args[0];
+          const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input instanceof Request ? input.url : "";
+          if (isSquarefeedUrl(requestUrl)) {
+            const clone = response.clone();
+            clone.json().then(
+              (data) => processSquarefeedPayload(data, store),
+              () => {
+                clone.text().then(
+                  (text) => {
+                    try {
+                      processSquarefeedPayload(JSON.parse(text), store);
+                    } catch {
+                    }
+                  },
+                  () => {
+                  }
+                );
+              }
+            );
+          }
+        } catch {
+        }
+        return response;
+      };
+    }
+    const OriginalXHR = win.XMLHttpRequest;
+    if (typeof OriginalXHR === "function") {
+      const originalOpen = OriginalXHR.prototype.open;
+      const originalSend = OriginalXHR.prototype.send;
+      OriginalXHR.prototype.open = function(method, url, ...rest) {
+        try {
+          this._xhsUrl = typeof url === "string" ? url : url.toString();
+        } catch {
+        }
+        return originalOpen.apply(this, [method, url, ...rest]);
+      };
+      OriginalXHR.prototype.send = function(body) {
+        try {
+          if (this._xhsUrl && isSquarefeedUrl(this._xhsUrl)) {
+            const xhrSelf = this;
+            this.addEventListener("load", function() {
+              try {
+                let parsed = null;
+                if (xhrSelf.responseType === "" || xhrSelf.responseType === "text") {
+                  parsed = JSON.parse(xhrSelf.responseText);
+                } else if (xhrSelf.responseType === "json") {
+                  parsed = xhrSelf.response;
+                }
+                if (parsed) {
+                  processSquarefeedPayload(parsed, store);
+                }
+              } catch {
+              }
+            });
+          }
+        } catch {
+        }
+        return originalSend.call(this, body);
+      };
+    }
+  }
+
   // src/main.ts
+  try {
+    const targetWin = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+    installSquarefeedInterceptor(targetWin);
+  } catch (e) {
+    console.warn("[xhs-live-filter] Install squarefeed interceptor failed:", e);
+  }
   function bootstrap() {
     if (window.__XHS_LIVE_FILTER_LOADED__) {
+      return;
+    }
+    if (!document.body) {
+      document.addEventListener("DOMContentLoaded", bootstrap, { once: true });
       return;
     }
     window.__XHS_LIVE_FILTER_LOADED__ = true;
     const app = new LiveFilterApp();
     app.start(document.body);
-    console.log("[xhs-live-filter] v0.1.0 started successfully");
+    console.log("[xhs-live-filter] v0.1.3-candidate started successfully");
   }
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", bootstrap);
+    document.addEventListener("DOMContentLoaded", bootstrap, { once: true });
   } else {
     bootstrap();
   }

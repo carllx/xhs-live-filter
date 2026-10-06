@@ -12,11 +12,13 @@ const banner = `// ==UserScript==
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @connect      xiaohongshu.com
 // @connect      edith.xiaohongshu.com
+// @connect      live-room.xiaohongshu.com
 // @updateURL    https://raw.githubusercontent.com/carllx/xhs-live-filter/main/dist/xhs-live-filter.user.js
 // @downloadURL  https://raw.githubusercontent.com/carllx/xhs-live-filter/main/dist/xhs-live-filter.user.js
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 `;
 
