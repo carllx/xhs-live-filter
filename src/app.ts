@@ -36,7 +36,8 @@ export class LiveFilterApp {
     customFetcher?: ProfileFetcher,
     calibrationGate?: GenderCalibrationGate,
     customBreaker?: CircuitBreaker,
-    identityStore?: FeedIdentityStore
+    identityStore?: FeedIdentityStore,
+    schedulerOptions?: { maxConcurrency?: number; minIntervalMs?: number }
   ) {
     // 读取持久化策略
     const savedKeyword = StorageAdapter.get<string>('contentKeyword', '');
@@ -70,7 +71,7 @@ export class LiveFilterApp {
         onStateChange: () => this.updateStats(),
       });
 
-    this.scheduler = new ViewportScheduler(this.breaker);
+    this.scheduler = new ViewportScheduler(this.breaker, schedulerOptions);
 
     this.ui = new FilterUI(
       {
@@ -159,21 +160,43 @@ export class LiveFilterApp {
     this.updateStats();
   }
 
+  private isEnrichmentNeeded(): boolean {
+    // 只有当当前策略实际需要 Profile Facts 时才启动网络请求：
+    // 1. 设置了目标属地（preferredRegions.length > 0）
+    // 2. 或性别门禁已校准（gender gate === CALIBRATED）
+    const hasRegionFilter = this.policy.preferredRegions.length > 0;
+    const isGenderCalibrated = this.calibrationGate.getStatus() === 'CALIBRATED';
+    return hasRegionFilter || isGenderCalibrated;
+  }
+
   private processCardWithUserId(info: ExtractedCardInfo): void {
     if (!info.userId) return;
     const cached = this.cache.get(info.userId);
     if (cached) {
+      ProfileFetcher.recordCacheHit();
       cached.gender = this.calibrationGate.normalize(cached.rawGender);
       this.factsMap.set(info.userId, cached);
       this.applyCardEvaluation(info, cached);
     } else {
       const initialUnknown = createUnknownFacts(info.userId);
       this.applyCardEvaluation(info, initialUnknown);
-      this.enqueueEnrichment(info.userId, info.cardElement);
+
+      // 按需启动检查：若无需 profile 事实，绝不产生请求
+      if (this.isEnrichmentNeeded()) {
+        this.enqueueEnrichment(info.userId, info.cardElement);
+      }
     }
   }
 
   private enqueueEnrichment(userId: string, cardElement: HTMLElement): void {
+    if (!userId || !this.isEnrichmentNeeded()) return;
+
+    // 全生命周期去重：cached / inFlight / queued
+    if (this.cache.get(userId) || this.factsMap.has(userId) || this.scheduler.isInFlightOrQueued(userId)) {
+      ProfileFetcher.recordDeduped();
+      return;
+    }
+
     this.scheduler.enqueue({
       userId,
       cardElement,
@@ -186,20 +209,23 @@ export class LiveFilterApp {
           this.cache.set(userId, facts);
           this.factsMap.set(userId, facts);
 
-          // 重新呈现该 userId 的所有卡片
+          // 重新呈现该 userId 的所有卡片（同一 userId 多张卡片共享同一次 enrichment）
           for (const info of this.cards.values()) {
             if (info.userId === userId) {
               this.applyCardEvaluation(info, facts);
             }
           }
         } catch (err: unknown) {
+          const isSecurityStop = (err as { isSecurityStop?: boolean })?.isSecurityStop;
           const isRateLimited = (err as { isRateLimited?: boolean })?.isRateLimited;
           const isVerification = (err as { isVerification?: boolean })?.isVerification;
+          const reason = (err as { reason?: string })?.reason || (isRateLimited ? 'HTTP 429 限流' : isVerification ? '出现验证码重定向' : '安全拦截');
 
-          if (isRateLimited || isVerification) {
-            this.breaker.trip(isRateLimited ? 'HTTP 429 限流' : '出现验证码重定向');
+          if (isSecurityStop || isRateLimited || isVerification) {
+            ProfileFetcher.recordPaused(reason);
+            this.breaker.trip(reason);
           } else {
-            console.warn(`[xhs-live-filter] Enrich user ${userId} failed (ordinary):`, err);
+            console.warn(`[xhs-live-filter] Enrich user failed (ordinary fail-open):`, err);
           }
         } finally {
           this.updateStats();
@@ -215,11 +241,21 @@ export class LiveFilterApp {
   }
 
   private handlePolicyChange(partialPolicy: Partial<V01Policy>): void {
+    const wasEnrichmentNeeded = this.isEnrichmentNeeded();
     this.policy = { ...this.policy, ...partialPolicy };
     StorageAdapter.set('allowedGenders', this.policy.allowedGenders);
     StorageAdapter.set('keepUnknownGender', this.policy.keepUnknownGender);
     StorageAdapter.set('preferredRegions', this.policy.preferredRegions);
     StorageAdapter.set('keepUnknownRegion', this.policy.keepUnknownRegion);
+
+    // 如果从“无筛选”变为“有属地筛选/性别筛选”，为当前卡片按需补发 enrichment
+    if (!wasEnrichmentNeeded && this.isEnrichmentNeeded()) {
+      for (const info of this.cards.values()) {
+        if (info.userId && !this.cache.get(info.userId) && !this.factsMap.has(info.userId)) {
+          this.enqueueEnrichment(info.userId, info.cardElement);
+        }
+      }
+    }
 
     this.refreshAll();
   }
@@ -250,9 +286,10 @@ export class LiveFilterApp {
         }
         return true;
       } catch (err: unknown) {
+        const isSecurityStop = (err as { isSecurityStop?: boolean })?.isSecurityStop;
         const isRateLimited = (err as { isRateLimited?: boolean })?.isRateLimited;
         const isVerification = (err as { isVerification?: boolean })?.isVerification;
-        if (isRateLimited || isVerification) {
+        if (isSecurityStop || isRateLimited || isVerification) {
           return false;
         }
         return true;

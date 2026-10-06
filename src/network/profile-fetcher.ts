@@ -8,21 +8,95 @@ import { NormalizedFacts } from '../domain/facts';
 
 export type HttpFetcher = (url: string) => Promise<{ status: number; text: string }>;
 
+declare const GM_xmlhttpRequest:
+  | ((details: {
+      method?: string;
+      url: string;
+      headers?: Record<string, string>;
+      anonymous?: boolean;
+      onload?: (response: { status: number; responseText: string; finalUrl?: string }) => void;
+      onerror?: (error: unknown) => void;
+      ontimeout?: () => void;
+    }) => void)
+  | undefined;
+
+export interface ProfileFetchStats {
+  transport: 'GM_xmlhttpRequest(anonymous)' | 'fetch(credentials:omit)';
+  requested: number;
+  cacheHit: number;
+  deduped: number;
+  pausedReason?: string;
+}
+
 export class ProfileFetcher {
   private fetcher: HttpFetcher;
+  private static stats: ProfileFetchStats = {
+    transport: typeof GM_xmlhttpRequest === 'function' ? 'GM_xmlhttpRequest(anonymous)' : 'fetch(credentials:omit)',
+    requested: 0,
+    cacheHit: 0,
+    deduped: 0,
+  };
 
   constructor(fetcher?: HttpFetcher) {
     this.fetcher = fetcher || this.defaultFetch;
   }
 
+  static getStats(): ProfileFetchStats {
+    return { ...this.stats };
+  }
+
+  static recordCacheHit(): void {
+    this.stats.cacheHit++;
+  }
+
+  static recordDeduped(): void {
+    this.stats.deduped++;
+  }
+
+  static recordPaused(reason: string): void {
+    this.stats.pausedReason = reason;
+    console.warn(`[xhs-live-filter] profile transport=${this.stats.transport} profile requested=${this.stats.requested} profile cache-hit=${this.stats.cacheHit} profile deduped=${this.stats.deduped} profile paused=${reason}`);
+  }
+
   private async defaultFetch(url: string): Promise<{ status: number; text: string }> {
+    ProfileFetcher.stats.requested++;
     const origin = typeof window !== 'undefined' && window.location?.origin && window.location.origin !== 'null'
       ? window.location.origin
       : 'https://www.xiaohongshu.com';
     const targetUrl = url.startsWith('http') ? url : `${origin}${url}`;
 
+    // 方案 1: 如果宿主环境支持 GM_xmlhttpRequest，优先采用 anonymous: true（无 Cookie、无授权）
+    if (typeof GM_xmlhttpRequest === 'function') {
+      ProfileFetcher.stats.transport = 'GM_xmlhttpRequest(anonymous)';
+      return new Promise<{ status: number; text: string }>((resolve, reject) => {
+        try {
+          GM_xmlhttpRequest!({
+            method: 'GET',
+            url: targetUrl,
+            anonymous: true, // 绝对不携带宿主 Cookies / Session 凭证
+            headers: {
+              'Accept': 'text/html,application/xhtml+xml',
+            },
+            onload: (res) => {
+              resolve({ status: res.status, text: res.responseText });
+            },
+            onerror: (err) => {
+              reject(err);
+            },
+            ontimeout: () => {
+              reject(new Error('GM_xmlhttpRequest timeout'));
+            },
+          });
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }
+
+    // 方案 2: 标准 fetch，严格使用 credentials: 'omit'，绝对不使用 same-origin 或 include
+    ProfileFetcher.stats.transport = 'fetch(credentials:omit)';
     const res = await fetch(targetUrl, {
-      credentials: 'same-origin',
+      credentials: 'omit', // 严格解耦：忽略任何当前登录账号 Cookie / Authorization
       headers: {
         'Accept': 'text/html,application/xhtml+xml',
       },
@@ -43,16 +117,39 @@ export class ProfileFetcher {
     const url = `/user/profile/${userId}`;
     const { status, text } = await this.fetcher(url);
 
-    // 检查风控限流与异常
-    if (status === 429) {
-      const err = new Error(`HTTP 429 Too Many Requests`);
-      (err as { isRateLimited?: boolean }).isRateLimited = true;
+    // 严格风控与登录拦截判定 (ADR / Safety Hardening):
+    // 遇到 HTTP 401, 403, 429, 验证码、登录页重定向或登录弹窗墙立即触发安全停止
+    if (status === 401 || status === 403) {
+      const err = new Error(`HTTP ${status} Auth/Forbidden`);
+      (err as { isSecurityStop?: boolean; reason?: string }).isSecurityStop = true;
+      (err as { isSecurityStop?: boolean; reason?: string }).reason = `HTTP ${status}`;
       throw err;
     }
 
-    if (text.includes('captcha') || text.includes('验证码') || text.includes('sec.xiaohongshu.com')) {
-      const err = new Error(`Verification page detected`);
-      (err as { isVerification?: boolean }).isVerification = true;
+    if (status === 429) {
+      const err = new Error(`HTTP 429 Too Many Requests`);
+      (err as { isRateLimited?: boolean; isSecurityStop?: boolean; reason?: string }).isRateLimited = true;
+      (err as { isRateLimited?: boolean; isSecurityStop?: boolean; reason?: string }).isSecurityStop = true;
+      (err as { isRateLimited?: boolean; isSecurityStop?: boolean; reason?: string }).reason = 'HTTP 429';
+      throw err;
+    }
+
+    if (
+      text.includes('captcha') ||
+      text.includes('验证码') ||
+      text.includes('sec.xiaohongshu.com') ||
+      text.includes('/login?redirectPath=') ||
+      text.includes('loginPadMountedTime') ||
+      text.includes('登录后推荐更懂你的笔记')
+    ) {
+      // 检查是否是纯登录重定向/拦截页面
+      const isCaptcha = text.includes('captcha') || text.includes('验证码') || text.includes('sec.xiaohongshu.com');
+      const isLoginWall = text.includes('/login?redirectPath=') || text.includes('loginPadMountedTime') || text.includes('登录后推荐更懂你的笔记');
+      const reason = isCaptcha ? 'captcha verification' : isLoginWall ? 'login wall redirect' : 'security page detected';
+      const err = new Error(isCaptcha ? 'Verification page detected' : `Security stop triggered: ${reason}`);
+      (err as { isVerification?: boolean; isSecurityStop?: boolean; reason?: string }).isVerification = isCaptcha;
+      (err as { isVerification?: boolean; isSecurityStop?: boolean; reason?: string }).isSecurityStop = true;
+      (err as { isVerification?: boolean; isSecurityStop?: boolean; reason?: string }).reason = reason;
       throw err;
     }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xhs-live-filter
 // @namespace    https://github.com/carllx/xhs-live-filter
-// @version      0.1.3-beta.3
+// @version      0.1.3-beta.4
 // @description  小红书直播广场智能过滤器
 // @author       carllx
 // @match        https://www.xiaohongshu.com/*
@@ -634,16 +634,65 @@
   };
 
   // src/network/profile-fetcher.ts
-  var ProfileFetcher = class {
+  var ProfileFetcher = class _ProfileFetcher {
     fetcher;
+    static stats = {
+      transport: typeof GM_xmlhttpRequest === "function" ? "GM_xmlhttpRequest(anonymous)" : "fetch(credentials:omit)",
+      requested: 0,
+      cacheHit: 0,
+      deduped: 0
+    };
     constructor(fetcher) {
       this.fetcher = fetcher || this.defaultFetch;
     }
+    static getStats() {
+      return { ...this.stats };
+    }
+    static recordCacheHit() {
+      this.stats.cacheHit++;
+    }
+    static recordDeduped() {
+      this.stats.deduped++;
+    }
+    static recordPaused(reason) {
+      this.stats.pausedReason = reason;
+      console.warn(`[xhs-live-filter] profile transport=${this.stats.transport} profile requested=${this.stats.requested} profile cache-hit=${this.stats.cacheHit} profile deduped=${this.stats.deduped} profile paused=${reason}`);
+    }
     async defaultFetch(url) {
+      _ProfileFetcher.stats.requested++;
       const origin = typeof window !== "undefined" && window.location?.origin && window.location.origin !== "null" ? window.location.origin : "https://www.xiaohongshu.com";
       const targetUrl = url.startsWith("http") ? url : `${origin}${url}`;
+      if (typeof GM_xmlhttpRequest === "function") {
+        _ProfileFetcher.stats.transport = "GM_xmlhttpRequest(anonymous)";
+        return new Promise((resolve, reject) => {
+          try {
+            GM_xmlhttpRequest({
+              method: "GET",
+              url: targetUrl,
+              anonymous: true,
+              // 绝对不携带宿主 Cookies / Session 凭证
+              headers: {
+                "Accept": "text/html,application/xhtml+xml"
+              },
+              onload: (res2) => {
+                resolve({ status: res2.status, text: res2.responseText });
+              },
+              onerror: (err) => {
+                reject(err);
+              },
+              ontimeout: () => {
+                reject(new Error("GM_xmlhttpRequest timeout"));
+              }
+            });
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }
+      _ProfileFetcher.stats.transport = "fetch(credentials:omit)";
       const res = await fetch(targetUrl, {
-        credentials: "same-origin",
+        credentials: "omit",
+        // 严格解耦：忽略任何当前登录账号 Cookie / Authorization
         headers: {
           "Accept": "text/html,application/xhtml+xml"
         }
@@ -661,14 +710,27 @@
       }
       const url = `/user/profile/${userId}`;
       const { status, text } = await this.fetcher(url);
+      if (status === 401 || status === 403) {
+        const err = new Error(`HTTP ${status} Auth/Forbidden`);
+        err.isSecurityStop = true;
+        err.reason = `HTTP ${status}`;
+        throw err;
+      }
       if (status === 429) {
         const err = new Error(`HTTP 429 Too Many Requests`);
         err.isRateLimited = true;
+        err.isSecurityStop = true;
+        err.reason = "HTTP 429";
         throw err;
       }
-      if (text.includes("captcha") || text.includes("\u9A8C\u8BC1\u7801") || text.includes("sec.xiaohongshu.com")) {
-        const err = new Error(`Verification page detected`);
-        err.isVerification = true;
+      if (text.includes("captcha") || text.includes("\u9A8C\u8BC1\u7801") || text.includes("sec.xiaohongshu.com") || text.includes("/login?redirectPath=") || text.includes("loginPadMountedTime") || text.includes("\u767B\u5F55\u540E\u63A8\u8350\u66F4\u61C2\u4F60\u7684\u7B14\u8BB0")) {
+        const isCaptcha = text.includes("captcha") || text.includes("\u9A8C\u8BC1\u7801") || text.includes("sec.xiaohongshu.com");
+        const isLoginWall = text.includes("/login?redirectPath=") || text.includes("loginPadMountedTime") || text.includes("\u767B\u5F55\u540E\u63A8\u8350\u66F4\u61C2\u4F60\u7684\u7B14\u8BB0");
+        const reason = isCaptcha ? "captcha verification" : isLoginWall ? "login wall redirect" : "security page detected";
+        const err = new Error(isCaptcha ? "Verification page detected" : `Security stop triggered: ${reason}`);
+        err.isVerification = isCaptcha;
+        err.isSecurityStop = true;
+        err.reason = reason;
         throw err;
       }
       if (status >= 400) {
@@ -789,18 +851,27 @@
 
   // src/network/viewport-scheduler.ts
   var ViewportScheduler = class _ViewportScheduler {
-    static MAX_CONCURRENCY = 2;
-    static THROTTLE_INTERVAL_MS = 50;
-    // 请求启动节流间隔
+    static DEFAULT_MAX_CONCURRENCY = 1;
+    // 默认严格保守并发：每次仅处理 1 个 profile 请求
+    static DEFAULT_MIN_INTERVAL_MS = typeof process !== "undefined" && false ? 50 : 1500;
+    // 生产环境至少 1500ms，单元测试环境 50ms 避免超时
+    static PRODUCTION_SAFE_INTERVAL_MS = 1500;
+    // 规范定义的安全间隔下限 (1500ms)
+    maxConcurrency;
+    minIntervalMs;
     observer = null;
     cardPriorityMap = /* @__PURE__ */ new WeakMap();
     queue = [];
+    inFlightUserIds = /* @__PURE__ */ new Set();
+    // 全生命周期在途用户集合
     inFlightCount = 0;
     lastRequestStartTime = 0;
     breaker;
     isProcessing = false;
-    constructor(breaker) {
+    constructor(breaker, options) {
       this.breaker = breaker;
+      this.maxConcurrency = options?.maxConcurrency ?? _ViewportScheduler.DEFAULT_MAX_CONCURRENCY;
+      this.minIntervalMs = options?.minIntervalMs ?? _ViewportScheduler.DEFAULT_MIN_INTERVAL_MS;
       this.initObserver();
     }
     initObserver() {
@@ -854,13 +925,16 @@
       return this.cardPriorityMap.get(cardElement) || "BUFFER";
     }
     enqueue(task) {
-      if (this.queue.some((t) => t.userId === task.userId)) {
+      if (this.queue.some((t) => t.userId === task.userId) || this.inFlightUserIds.has(task.userId)) {
         return;
       }
       task.priority = this.getCardPriority(task.cardElement);
       this.queue.push(task);
       this.reorderQueue();
       this.schedule();
+    }
+    isInFlightOrQueued(userId) {
+      return this.inFlightUserIds.has(userId) || this.queue.some((t) => t.userId === userId);
     }
     reorderQueue() {
       for (const item of this.queue) {
@@ -880,11 +954,11 @@
     async processNext() {
       this.isProcessing = true;
       try {
-        while (this.queue.length > 0 && this.inFlightCount < _ViewportScheduler.MAX_CONCURRENCY && !this.breaker.isPaused()) {
+        while (this.queue.length > 0 && this.inFlightCount < this.maxConcurrency && !this.breaker.isPaused()) {
           const now = Date.now();
           const elapsed = now - this.lastRequestStartTime;
-          if (elapsed < _ViewportScheduler.THROTTLE_INTERVAL_MS) {
-            const waitTime = _ViewportScheduler.THROTTLE_INTERVAL_MS - elapsed;
+          if (elapsed < this.minIntervalMs) {
+            const waitTime = this.minIntervalMs - elapsed;
             await new Promise((r) => setTimeout(r, waitTime));
             if (this.breaker.isPaused()) break;
           }
@@ -894,11 +968,13 @@
             continue;
           }
           this.inFlightCount++;
+          this.inFlightUserIds.add(task.userId);
           this.lastRequestStartTime = Date.now();
           task.execute().catch((err) => {
             console.warn(`[xhs-live-filter] Task for ${task.userId} failed:`, err);
           }).finally(() => {
             this.inFlightCount--;
+            this.inFlightUserIds.delete(task.userId);
             this.schedule();
           });
         }
@@ -1213,7 +1289,7 @@
     identityStore;
     unsubscribeIdentityStore;
     boundCardCount = 0;
-    constructor(customFetcher, calibrationGate, customBreaker, identityStore) {
+    constructor(customFetcher, calibrationGate, customBreaker, identityStore, schedulerOptions) {
       const savedKeyword = StorageAdapter.get("contentKeyword", "");
       const savedRegions = StorageAdapter.get("preferredRegions", DEFAULT_POLICY.preferredRegions);
       const savedKeepUnknownRegion = StorageAdapter.get("keepUnknownRegion", DEFAULT_POLICY.keepUnknownRegion);
@@ -1237,7 +1313,7 @@
       this.breaker = customBreaker || new CircuitBreaker({
         onStateChange: () => this.updateStats()
       });
-      this.scheduler = new ViewportScheduler(this.breaker);
+      this.scheduler = new ViewportScheduler(this.breaker, schedulerOptions);
       this.ui = new FilterUI(
         {
           onKeywordChange: (kw) => this.handleKeywordChange(kw),
@@ -1307,20 +1383,33 @@
       }
       this.updateStats();
     }
+    isEnrichmentNeeded() {
+      const hasRegionFilter = this.policy.preferredRegions.length > 0;
+      const isGenderCalibrated = this.calibrationGate.getStatus() === "CALIBRATED";
+      return hasRegionFilter || isGenderCalibrated;
+    }
     processCardWithUserId(info) {
       if (!info.userId) return;
       const cached = this.cache.get(info.userId);
       if (cached) {
+        ProfileFetcher.recordCacheHit();
         cached.gender = this.calibrationGate.normalize(cached.rawGender);
         this.factsMap.set(info.userId, cached);
         this.applyCardEvaluation(info, cached);
       } else {
         const initialUnknown = createUnknownFacts(info.userId);
         this.applyCardEvaluation(info, initialUnknown);
-        this.enqueueEnrichment(info.userId, info.cardElement);
+        if (this.isEnrichmentNeeded()) {
+          this.enqueueEnrichment(info.userId, info.cardElement);
+        }
       }
     }
     enqueueEnrichment(userId, cardElement) {
+      if (!userId || !this.isEnrichmentNeeded()) return;
+      if (this.cache.get(userId) || this.factsMap.has(userId) || this.scheduler.isInFlightOrQueued(userId)) {
+        ProfileFetcher.recordDeduped();
+        return;
+      }
       this.scheduler.enqueue({
         userId,
         cardElement,
@@ -1337,12 +1426,15 @@
               }
             }
           } catch (err) {
+            const isSecurityStop = err?.isSecurityStop;
             const isRateLimited = err?.isRateLimited;
             const isVerification = err?.isVerification;
-            if (isRateLimited || isVerification) {
-              this.breaker.trip(isRateLimited ? "HTTP 429 \u9650\u6D41" : "\u51FA\u73B0\u9A8C\u8BC1\u7801\u91CD\u5B9A\u5411");
+            const reason = err?.reason || (isRateLimited ? "HTTP 429 \u9650\u6D41" : isVerification ? "\u51FA\u73B0\u9A8C\u8BC1\u7801\u91CD\u5B9A\u5411" : "\u5B89\u5168\u62E6\u622A");
+            if (isSecurityStop || isRateLimited || isVerification) {
+              ProfileFetcher.recordPaused(reason);
+              this.breaker.trip(reason);
             } else {
-              console.warn(`[xhs-live-filter] Enrich user ${userId} failed (ordinary):`, err);
+              console.warn(`[xhs-live-filter] Enrich user failed (ordinary fail-open):`, err);
             }
           } finally {
             this.updateStats();
@@ -1356,11 +1448,19 @@
       this.refreshAll();
     }
     handlePolicyChange(partialPolicy) {
+      const wasEnrichmentNeeded = this.isEnrichmentNeeded();
       this.policy = { ...this.policy, ...partialPolicy };
       StorageAdapter.set("allowedGenders", this.policy.allowedGenders);
       StorageAdapter.set("keepUnknownGender", this.policy.keepUnknownGender);
       StorageAdapter.set("preferredRegions", this.policy.preferredRegions);
       StorageAdapter.set("keepUnknownRegion", this.policy.keepUnknownRegion);
+      if (!wasEnrichmentNeeded && this.isEnrichmentNeeded()) {
+        for (const info of this.cards.values()) {
+          if (info.userId && !this.cache.get(info.userId) && !this.factsMap.has(info.userId)) {
+            this.enqueueEnrichment(info.userId, info.cardElement);
+          }
+        }
+      }
       this.refreshAll();
     }
     async handleManualRecover() {
@@ -1387,9 +1487,10 @@
           }
           return true;
         } catch (err) {
+          const isSecurityStop = err?.isSecurityStop;
           const isRateLimited = err?.isRateLimited;
           const isVerification = err?.isVerification;
-          if (isRateLimited || isVerification) {
+          if (isSecurityStop || isRateLimited || isVerification) {
             return false;
           }
           return true;
@@ -1634,7 +1735,7 @@
     window.__XHS_LIVE_FILTER_LOADED__ = true;
     const app = new LiveFilterApp();
     app.start(document.body);
-    console.log("[xhs-live-filter] v0.1.3-beta.3 candidate started successfully");
+    console.log("[xhs-live-filter] v0.1.3-beta.4 candidate started successfully");
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", bootstrap, { once: true });

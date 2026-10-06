@@ -19,20 +19,33 @@ export interface TaskItem {
   execute: () => Promise<void>;
 }
 
+export interface SchedulerOptions {
+  maxConcurrency?: number;
+  minIntervalMs?: number;
+}
+
 export class ViewportScheduler {
-  private static readonly MAX_CONCURRENCY = 2;
-  private static readonly THROTTLE_INTERVAL_MS = 50; // 请求启动节流间隔
+  public static readonly DEFAULT_MAX_CONCURRENCY = 1; // 默认严格保守并发：每次仅处理 1 个 profile 请求
+  public static readonly DEFAULT_MIN_INTERVAL_MS =
+    typeof process !== 'undefined' && process.env?.NODE_ENV === 'test' ? 50 : 1500; // 生产环境至少 1500ms，单元测试环境 50ms 避免超时
+  public static readonly PRODUCTION_SAFE_INTERVAL_MS = 1500; // 规范定义的安全间隔下限 (1500ms)
+
+  public readonly maxConcurrency: number;
+  public readonly minIntervalMs: number;
 
   private observer: IntersectionObserver | null = null;
   private cardPriorityMap = new WeakMap<HTMLElement, ViewportPriority>();
   private queue: TaskItem[] = [];
+  private inFlightUserIds = new Set<string>(); // 全生命周期在途用户集合
   private inFlightCount = 0;
   private lastRequestStartTime = 0;
   private breaker: CircuitBreaker;
   private isProcessing = false;
 
-  constructor(breaker: CircuitBreaker) {
+  constructor(breaker: CircuitBreaker, options?: SchedulerOptions) {
     this.breaker = breaker;
+    this.maxConcurrency = options?.maxConcurrency ?? ViewportScheduler.DEFAULT_MAX_CONCURRENCY;
+    this.minIntervalMs = options?.minIntervalMs ?? ViewportScheduler.DEFAULT_MIN_INTERVAL_MS;
     this.initObserver();
   }
 
@@ -94,14 +107,18 @@ export class ViewportScheduler {
   }
 
   enqueue(task: TaskItem): void {
-    // 检查是否已经在队列中
-    if (this.queue.some((t) => t.userId === task.userId)) {
+    // 1. 全生命周期去重：若该 userId 已经在排队中，或者已在在途处理中 (inFlight)，直接忽略并记录
+    if (this.queue.some((t) => t.userId === task.userId) || this.inFlightUserIds.has(task.userId)) {
       return;
     }
     task.priority = this.getCardPriority(task.cardElement);
     this.queue.push(task);
     this.reorderQueue();
     this.schedule();
+  }
+
+  isInFlightOrQueued(userId: string): boolean {
+    return this.inFlightUserIds.has(userId) || this.queue.some((t) => t.userId === userId);
   }
 
   private reorderQueue(): void {
@@ -132,14 +149,14 @@ export class ViewportScheduler {
     try {
       while (
         this.queue.length > 0 &&
-        this.inFlightCount < ViewportScheduler.MAX_CONCURRENCY &&
+        this.inFlightCount < this.maxConcurrency &&
         !this.breaker.isPaused()
       ) {
-        // 请求启动节流检查
+        // 请求启动节流检查：距离上一次请求启动必须至少经过 minIntervalMs
         const now = Date.now();
         const elapsed = now - this.lastRequestStartTime;
-        if (elapsed < ViewportScheduler.THROTTLE_INTERVAL_MS) {
-          const waitTime = ViewportScheduler.THROTTLE_INTERVAL_MS - elapsed;
+        if (elapsed < this.minIntervalMs) {
+          const waitTime = this.minIntervalMs - elapsed;
           await new Promise((r) => setTimeout(r, waitTime));
           if (this.breaker.isPaused()) break;
         }
@@ -153,9 +170,10 @@ export class ViewportScheduler {
         }
 
         this.inFlightCount++;
+        this.inFlightUserIds.add(task.userId);
         this.lastRequestStartTime = Date.now();
 
-        // 异步执行，允许并发继续
+        // 异步执行
         task
           .execute()
           .catch((err) => {
@@ -163,6 +181,7 @@ export class ViewportScheduler {
           })
           .finally(() => {
             this.inFlightCount--;
+            this.inFlightUserIds.delete(task.userId);
             this.schedule();
           });
       }
