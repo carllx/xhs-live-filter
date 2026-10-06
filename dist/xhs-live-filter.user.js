@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xhs-live-filter
 // @namespace    https://github.com/carllx/xhs-live-filter
-// @version      0.1.3-beta.2
+// @version      0.1.3-beta.3
 // @description  小红书直播广场智能过滤器
 // @author       carllx
 // @match        https://www.xiaohongshu.com/*
@@ -19,6 +19,93 @@
 
 "use strict";
 (() => {
+  // src/domain/region-matcher.ts
+  var PROVINCES_MAP = {
+    \u5E7F\u4E1C: ["\u5E7F\u4E1C", "\u5E7F\u4E1C\u7701", "\u7CA4"],
+    \u5E7F\u897F: ["\u5E7F\u897F", "\u5E7F\u897F\u58EE\u65CF\u81EA\u6CBB\u533A", "\u6842"],
+    \u5317\u4EAC: ["\u5317\u4EAC", "\u5317\u4EAC\u5E02", "\u4EAC"],
+    \u4E0A\u6D77: ["\u4E0A\u6D77", "\u4E0A\u6D77\u5E02", "\u6CAA"],
+    \u5929\u6D25: ["\u5929\u6D25", "\u5929\u6D25\u5E02", "\u6D25"],
+    \u91CD\u5E86: ["\u91CD\u5E86", "\u91CD\u5E86\u5E02", "\u6E1D"],
+    \u6CB3\u5317: ["\u6CB3\u5317", "\u6CB3\u5317\u7701", "\u5180"],
+    \u5C71\u897F: ["\u5C71\u897F", "\u5C71\u897F\u7701", "\u664B"],
+    \u8FBD\u5B81: ["\u8FBD\u5B81", "\u8FBD\u5B81\u7701", "\u8FBD"],
+    \u5409\u6797: ["\u5409\u6797", "\u5409\u6797\u7701", "\u5409"],
+    \u9ED1\u9F99\u6C5F: ["\u9ED1\u9F99\u6C5F", "\u9ED1\u9F99\u6C5F\u7701", "\u9ED1"],
+    \u6C5F\u82CF: ["\u6C5F\u82CF", "\u6C5F\u82CF\u7701", "\u82CF"],
+    \u6D59\u6C5F: ["\u6D59\u6C5F", "\u6D59\u6C5F\u7701", "\u6D59"],
+    \u5B89\u5FBD: ["\u5B89\u5FBD", "\u5B89\u5FBD\u7701", "\u7696"],
+    \u798F\u5EFA: ["\u798F\u5EFA", "\u798F\u5EFA\u7701", "\u95FD"],
+    \u6C5F\u897F: ["\u6C5F\u897F", "\u6C5F\u897F\u7701", "\u8D63"],
+    \u5C71\u4E1C: ["\u5C71\u4E1C", "\u5C71\u4E1C\u7701", "\u9C81"],
+    \u6CB3\u5357: ["\u6CB3\u5357", "\u6CB3\u5357\u7701", "\u8C6B"],
+    \u6E56\u5317: ["\u6E56\u5317", "\u6E56\u5317\u7701", "\u9102"],
+    \u6E56\u5357: ["\u6E56\u5357", "\u6E56\u5357\u7701", "\u6E58"],
+    \u6D77\u5357: ["\u6D77\u5357", "\u6D77\u5357\u7701", "\u743C"],
+    \u56DB\u5DDD: ["\u56DB\u5DDD", "\u56DB\u5DDD\u7701", "\u5DDD", "\u8700"],
+    \u8D35\u5DDE: ["\u8D35\u5DDE", "\u8D35\u5DDE\u7701", "\u9ED4", "\u8D35"],
+    \u4E91\u5357: ["\u4E91\u5357", "\u4E91\u5357\u7701", "\u6EC7", "\u4E91"],
+    \u9655\u897F: ["\u9655\u897F", "\u9655\u897F\u7701", "\u9655", "\u79E6"],
+    \u7518\u8083: ["\u7518\u8083", "\u7518\u8083\u7701", "\u7518", "\u9647"],
+    \u9752\u6D77: ["\u9752\u6D77", "\u9752\u6D77\u7701", "\u9752"],
+    \u53F0\u6E7E: ["\u53F0\u6E7E", "\u53F0\u6E7E\u7701", "\u53F0"],
+    \u5185\u8499\u53E4: ["\u5185\u8499\u53E4", "\u5185\u8499\u53E4\u81EA\u6CBB\u533A", "\u8499"],
+    \u897F\u85CF: ["\u897F\u85CF", "\u897F\u85CF\u81EA\u6CBB\u533A", "\u85CF"],
+    \u5B81\u590F: ["\u5B81\u590F", "\u5B81\u590F\u56DE\u65CF\u81EA\u6CBB\u533A", "\u5B81"],
+    \u65B0\u7586: ["\u65B0\u7586", "\u65B0\u7586\u7EF4\u543E\u5C14\u81EA\u6CBB\u533A", "\u65B0"],
+    \u9999\u6E2F: ["\u9999\u6E2F", "\u9999\u6E2F\u7279\u522B\u884C\u653F\u533A", "\u6E2F"],
+    \u6FB3\u95E8: ["\u6FB3\u95E8", "\u6FB3\u95E8\u7279\u522B\u884C\u653F\u533A", "\u6FB3"]
+  };
+  function matchSingleRegion(preferred, factRegion) {
+    const normPref = preferred.trim();
+    const normFact = factRegion.trim();
+    if (!normPref || !normFact || normFact === "unknown") {
+      return false;
+    }
+    if (normPref === normFact) {
+      return true;
+    }
+    let matchedProvinceKey;
+    for (const [key, aliases] of Object.entries(PROVINCES_MAP)) {
+      if (key === normPref || aliases.includes(normPref)) {
+        matchedProvinceKey = key;
+        break;
+      }
+    }
+    if (matchedProvinceKey) {
+      const validPrefixes = PROVINCES_MAP[matchedProvinceKey];
+      const startsWithProvince = validPrefixes.some((prefix) => normFact.startsWith(prefix));
+      if (startsWithProvince) {
+        for (const [otherKey, otherAliases] of Object.entries(PROVINCES_MAP)) {
+          if (otherKey !== matchedProvinceKey) {
+            if (otherAliases.some((alias) => normFact.startsWith(alias) && alias.length >= 2)) {
+              if (!validPrefixes.some((p) => p.length >= 2 && normFact.startsWith(p))) {
+                return false;
+              }
+            }
+          }
+        }
+        return true;
+      }
+    }
+    if (normFact.startsWith(normPref)) {
+      return true;
+    }
+    if (normFact.includes(normPref)) {
+      return true;
+    }
+    return false;
+  }
+  function matchPreferredRegions(preferredRegions, factRegion) {
+    if (preferredRegions.length === 0) {
+      return true;
+    }
+    if (!factRegion || factRegion === "unknown") {
+      return false;
+    }
+    return preferredRegions.some((pref) => matchSingleRegion(pref, factRegion));
+  }
+
   // src/domain/evaluation.ts
   function matchContent(keyword, title, nickname) {
     const normalizedKeyword = keyword.trim().toLowerCase();
@@ -46,7 +133,7 @@
       if (facts.region === "unknown") {
         regionMatch = policy.keepUnknownRegion;
       } else {
-        regionMatch = policy.preferredRegions.includes(facts.region);
+        regionMatch = matchPreferredRegions(policy.preferredRegions, facts.region);
       }
     }
     if (!genderMatch || !regionMatch) {
@@ -58,7 +145,7 @@
         reason: !genderMatch ? `\u6027\u522B\u4E0D\u7B26 (${facts.gender})` : `\u5C5E\u5730\u4E0D\u7B26 (${facts.region})`
       };
     }
-    const isTargetRegion = facts.region !== "unknown" && policy.preferredRegions.includes(facts.region);
+    const isTargetRegion = policy.preferredRegions.length > 0 && facts.region !== "unknown" && matchPreferredRegions(policy.preferredRegions, facts.region);
     if (isTargetRegion) {
       return {
         status: "TARGET",
@@ -267,6 +354,25 @@
 
   // src/dom/card-presenter.ts
   var CardPresenter = class {
+    static styleInjected = false;
+    /**
+     * 确保注入隐藏样式规则（display: none !important），让网格/Flex 紧凑自动重排
+     */
+    static ensureStyleInjected() {
+      if (this.styleInjected || typeof document === "undefined") return;
+      const styleId = "xhs-live-filter-presenter-style";
+      if (!document.getElementById(styleId)) {
+        const style = document.createElement("style");
+        style.id = styleId;
+        style.textContent = `
+        .xhs-filter-hidden {
+          display: none !important;
+        }
+      `;
+        (document.head || document.documentElement).appendChild(style);
+      }
+      this.styleInjected = true;
+    }
     /**
      * 应用综合过滤结果（内容匹配 + 资格状态）
      * @param cardElement 卡片原生容器
@@ -275,15 +381,18 @@
      * @param facts 主播事实
      */
     static applyPresentation(cardElement, contentMatched, evalResult, facts) {
+      this.ensureStyleInjected();
       const isExcluded = evalResult.status === "EXCLUDED";
       const isVisible = contentMatched && !isExcluded;
       if (!isVisible) {
+        cardElement.classList.add("xhs-filter-hidden");
         cardElement.style.visibility = "hidden";
         cardElement.style.pointerEvents = "none";
         cardElement.setAttribute("data-xhs-filter-hidden", "true");
         this.removeBadge(cardElement);
         return;
       }
+      cardElement.classList.remove("xhs-filter-hidden");
       cardElement.style.visibility = "visible";
       cardElement.style.pointerEvents = "auto";
       cardElement.style.opacity = "1";
@@ -300,11 +409,14 @@
      * 兼容旧接口：仅内容匹配
      */
     static applyContentMatch(cardElement, matched) {
+      this.ensureStyleInjected();
       if (matched) {
+        cardElement.classList.remove("xhs-filter-hidden");
         cardElement.style.visibility = "visible";
         cardElement.style.pointerEvents = "auto";
         cardElement.removeAttribute("data-xhs-filter-hidden");
       } else {
+        cardElement.classList.add("xhs-filter-hidden");
         cardElement.style.visibility = "hidden";
         cardElement.style.pointerEvents = "none";
         cardElement.setAttribute("data-xhs-filter-hidden", "true");
@@ -575,31 +687,34 @@
         try {
           const cleanJson = stateMatch[1].replace(/:\s*undefined/g, ": null");
           const state = JSON.parse(cleanJson);
-          const user = state?.user?.userPageData?.basicInfo || state?.user?.user?.basicInfo || state?.user?.userPageData;
+          const user = state?.user?.userPageData?.basicInfo || state?.user?.userInfo?.basicInfo || state?.user?.user?.basicInfo || state?.user?.userPageData || state?.user?.userInfo;
           if (user) {
             if (user.gender !== void 0) {
               rawGender = user.gender;
             }
             if (user.ipLocation) {
               ipLocation = user.ipLocation;
+            } else if (user.location) {
+              ipLocation = user.location;
             }
           }
         } catch (e) {
         }
       }
       if (ipLocation === "unknown") {
-        const ipMatch = html.match(/IP\s*属地[：:]\s*([^\s<"']+)/) || html.match(/"ipLocation"\s*:\s*"([^"]+)"/);
+        const ipMatch = html.match(/IP\s*属地[：:\s]+([^\s<"']+)/) || html.match(/IP(?:\\u0020)*\\u5c5e\\u5730[：:\s\\uff1a]+([^\s<"'\\]+)/) || html.match(/"ipLocation"\s*:\s*"([^"]+)"/) || html.match(/\\?"ipLocation\\?"\s*:\s*\\?"([^"\\]+)\\?"/);
         if (ipMatch && ipMatch[1]) {
           ipLocation = ipMatch[1];
         }
       }
       if (rawGender === void 0) {
-        const genderMatch = html.match(/"gender"\s*:\s*([0-9]+)/);
+        const genderMatch = html.match(/"gender"\s*:\s*([0-9]+)/) || html.match(/\\?"gender\\?"\s*:\s*([0-9]+)/);
         if (genderMatch && genderMatch[1]) {
           rawGender = parseInt(genderMatch[1], 10);
         }
       }
       let cleanRegion = ipLocation.replace(/^中国\s*/, "").trim();
+      cleanRegion = cleanRegion.replace(/^IP\s*属地[：:]\s*/, "").trim();
       if (!cleanRegion) cleanRegion = "unknown";
       return {
         userId,
@@ -1519,7 +1634,7 @@
     window.__XHS_LIVE_FILTER_LOADED__ = true;
     const app = new LiveFilterApp();
     app.start(document.body);
-    console.log("[xhs-live-filter] v0.1.3-beta.2 candidate started successfully");
+    console.log("[xhs-live-filter] v0.1.3-beta.3 candidate started successfully");
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", bootstrap, { once: true });

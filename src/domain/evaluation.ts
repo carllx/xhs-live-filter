@@ -6,6 +6,7 @@
 
 import { NormalizedFacts } from './facts';
 import { V01Policy } from './policy';
+import { matchPreferredRegions } from './region-matcher';
 
 export type QualificationStatus = 'TARGET' | 'CANDIDATE' | 'EXCLUDED';
 
@@ -62,7 +63,7 @@ export function evaluate(
     if (facts.region === 'unknown') {
       regionMatch = policy.keepUnknownRegion;
     } else {
-      regionMatch = policy.preferredRegions.includes(facts.region);
+      regionMatch = matchPreferredRegions(policy.preferredRegions, facts.region);
     }
   }
 
@@ -77,8 +78,11 @@ export function evaluate(
     };
   }
 
-  // 命中属地筛选列表时赋予 TARGET，其余（如未知属地保留或未限属地）为 CANDIDATE
-  const isTargetRegion = facts.region !== 'unknown' && policy.preferredRegions.includes(facts.region);
+  // 命中属地筛选列表时赋予 TARGET（当 preferredRegions 为空时不限属地，卡片保持 CANDIDATE）
+  const isTargetRegion =
+    policy.preferredRegions.length > 0 &&
+    facts.region !== 'unknown' &&
+    matchPreferredRegions(policy.preferredRegions, facts.region);
   if (isTargetRegion) {
     return {
       status: 'TARGET',

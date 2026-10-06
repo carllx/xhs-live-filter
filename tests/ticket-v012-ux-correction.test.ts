@@ -102,9 +102,8 @@ describe('v0.1.2 UX / Filtering Correction & Truthful Controls', () => {
     expect(card3.style.visibility).toBe('visible');
     expect(card3.querySelector('.xhs-filter-badge')?.textContent).toBe('广东');
 
-    // card2 (上海) 不符合广东，真实隐藏！(ADR-0001: 节点不删除，display != none)
-    expect(card2.style.visibility).toBe('hidden');
-    expect(card2.style.display).not.toBe('none');
+    // card2 (上海) 不符合广东，真实隐藏！通过 xhs-filter-hidden 紧凑隐藏，节点不从 DOM 删除
+    expect(card2.classList.contains('xhs-filter-hidden')).toBe(true);
     expect(card2.parentNode).not.toBeNull();
 
     // card4 (未知属地) 在 keepUnknownRegion=true 下默认保留可见

@@ -77,13 +77,21 @@ export class ProfileFetcher {
         // 部分字段可能带有 undefined，做基础净化
         const cleanJson = stateMatch[1].replace(/:\s*undefined/g, ': null');
         const state = JSON.parse(cleanJson);
-        const user = state?.user?.userPageData?.basicInfo || state?.user?.user?.basicInfo || state?.user?.userPageData;
+        const user =
+          state?.user?.userPageData?.basicInfo ||
+          state?.user?.userInfo?.basicInfo ||
+          state?.user?.user?.basicInfo ||
+          state?.user?.userPageData ||
+          state?.user?.userInfo;
+
         if (user) {
           if (user.gender !== undefined) {
             rawGender = user.gender;
           }
           if (user.ipLocation) {
             ipLocation = user.ipLocation;
+          } else if (user.location) {
+            ipLocation = user.location;
           }
         }
       } catch (e) {
@@ -91,24 +99,31 @@ export class ProfileFetcher {
       }
     }
 
-    // 2. 降级：从 HTML 文本或标签中正则匹配 ipLocation
+    // 2. 降级：从 HTML 文本、unicode 转义或属性中正则匹配 ipLocation / 属地
     if (ipLocation === 'unknown') {
-      const ipMatch = html.match(/IP\s*属地[：:]\s*([^\s<"']+)/) ||
-                      html.match(/"ipLocation"\s*:\s*"([^"]+)"/);
+      const ipMatch =
+        html.match(/IP\s*属地[：:\s]+([^\s<"']+)/) ||
+        html.match(/IP(?:\\u0020)*\\u5c5e\\u5730[：:\s\\uff1a]+([^\s<"'\\]+)/) ||
+        html.match(/"ipLocation"\s*:\s*"([^"]+)"/) ||
+        html.match(/\\?"ipLocation\\?"\s*:\s*\\?"([^"\\]+)\\?"/);
       if (ipMatch && ipMatch[1]) {
         ipLocation = ipMatch[1];
       }
     }
 
     if (rawGender === undefined) {
-      const genderMatch = html.match(/"gender"\s*:\s*([0-9]+)/);
+      const genderMatch =
+        html.match(/"gender"\s*:\s*([0-9]+)/) ||
+        html.match(/\\?"gender\\?"\s*:\s*([0-9]+)/);
       if (genderMatch && genderMatch[1]) {
         rawGender = parseInt(genderMatch[1], 10);
       }
     }
 
-    // 属地标签清洗（移除“中国”前缀，保留省/国级粗粒度）
+    // 属地标签清洗（移除“中国”前缀，保留完整公开属地如“广东广州”、“贵州贵阳”）
     let cleanRegion = ipLocation.replace(/^中国\s*/, '').trim();
+    // 移除常见多余字样如“IP属地：”
+    cleanRegion = cleanRegion.replace(/^IP\s*属地[：:]\s*/, '').trim();
     if (!cleanRegion) cleanRegion = 'unknown';
 
     return {

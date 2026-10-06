@@ -11,6 +11,27 @@ import { EvaluationResult } from '../domain/evaluation';
 import { NormalizedFacts } from '../domain/facts';
 
 export class CardPresenter {
+  private static styleInjected = false;
+
+  /**
+   * 确保注入隐藏样式规则（display: none !important），让网格/Flex 紧凑自动重排
+   */
+  static ensureStyleInjected(): void {
+    if (this.styleInjected || typeof document === 'undefined') return;
+    const styleId = 'xhs-live-filter-presenter-style';
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement('style');
+      style.id = styleId;
+      style.textContent = `
+        .xhs-filter-hidden {
+          display: none !important;
+        }
+      `;
+      (document.head || document.documentElement).appendChild(style);
+    }
+    this.styleInjected = true;
+  }
+
   /**
    * 应用综合过滤结果（内容匹配 + 资格状态）
    * @param cardElement 卡片原生容器
@@ -24,11 +45,13 @@ export class CardPresenter {
     evalResult: EvaluationResult,
     facts: NormalizedFacts
   ): void {
+    this.ensureStyleInjected();
     const isExcluded = evalResult.status === 'EXCLUDED';
     const isVisible = contentMatched && !isExcluded;
 
     if (!isVisible) {
-      // 占位隐藏，保留原生几何结构
+      // 紧凑隐藏：通过 class 设置 display: none !important，触发原生网格重排，不留空洞
+      cardElement.classList.add('xhs-filter-hidden');
       cardElement.style.visibility = 'hidden';
       cardElement.style.pointerEvents = 'none';
       cardElement.setAttribute('data-xhs-filter-hidden', 'true');
@@ -37,6 +60,7 @@ export class CardPresenter {
     }
 
     // 符合全部条件的卡片恢复可见
+    cardElement.classList.remove('xhs-filter-hidden');
     cardElement.style.visibility = 'visible';
     cardElement.style.pointerEvents = 'auto';
     cardElement.style.opacity = '1';
@@ -46,7 +70,7 @@ export class CardPresenter {
 
     // Badge 呈现策略：
     // CANDIDATE: 绝不展示任何"普通"标签，保持页面清爽
-    // TARGET: 仅展示极小事实标签（例如：广东）
+    // TARGET: 仅展示极小主播完整事实标签（例如：广东广州、贵州贵阳）
     if (evalResult.status === 'TARGET' && facts.region !== 'unknown') {
       this.setBadge(cardElement, facts.region, '#52c41a');
     } else {
@@ -58,11 +82,14 @@ export class CardPresenter {
    * 兼容旧接口：仅内容匹配
    */
   static applyContentMatch(cardElement: HTMLElement, matched: boolean): void {
+    this.ensureStyleInjected();
     if (matched) {
+      cardElement.classList.remove('xhs-filter-hidden');
       cardElement.style.visibility = 'visible';
       cardElement.style.pointerEvents = 'auto';
       cardElement.removeAttribute('data-xhs-filter-hidden');
     } else {
+      cardElement.classList.add('xhs-filter-hidden');
       cardElement.style.visibility = 'hidden';
       cardElement.style.pointerEvents = 'none';
       cardElement.setAttribute('data-xhs-filter-hidden', 'true');
