@@ -5,7 +5,7 @@ import * as path from 'path';
 const banner = `// ==UserScript==
 // @name         xhs-live-filter
 // @namespace    https://github.com/carllx/xhs-live-filter
-// @version      0.1.3-beta.1
+// @version      0.1.3-beta.2
 // @description  小红书直播广场智能过滤器
 // @author       carllx
 // @match        https://www.xiaohongshu.com/*
