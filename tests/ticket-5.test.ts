@@ -11,6 +11,7 @@ describe('Ticket #5: Safety Hardened Viewport Scheduling & Paused Probe Recovery
 
   beforeEach(() => {
     localStorage.clear();
+    localStorage.setItem('xhs_filter_profileEnrichmentEnabled', JSON.stringify(true));
     document.body.innerHTML = '';
     fixture = createLiveSquareFixture();
     document.body.appendChild(fixture);

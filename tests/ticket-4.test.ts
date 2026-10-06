@@ -10,6 +10,7 @@ describe('Ticket #4: Gender Calibration Gate & Configurable Qualification', () =
 
   beforeEach(() => {
     localStorage.clear();
+    localStorage.setItem('xhs_filter_profileEnrichmentEnabled', JSON.stringify(true));
     document.body.innerHTML = '';
     fixture = createLiveSquareFixture();
     document.body.appendChild(fixture);

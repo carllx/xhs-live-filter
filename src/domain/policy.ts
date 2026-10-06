@@ -5,7 +5,7 @@
 export interface V01Policy {
   /** 内容关键词过滤（普通子串匹配） */
   contentKeyword: string;
-  /** 目标属地筛选列表（为空表示不限属地），默认 ['广东'] */
+  /** 目标属地筛选列表（为空表示不限属地），默认 [] */
   preferredRegions: string[];
   /** 保留未知属地的主播卡片（Fail-Open 开关），默认 true */
   keepUnknownRegion: boolean;
@@ -15,6 +15,8 @@ export interface V01Policy {
   keepUnknownGender: boolean;
   /** 是否隐藏被排除的卡片（保持兼容），默认 true */
   hideExcluded: boolean;
+  /** 是否启用主动匿名属地补全（显式授权门禁，默认严格关闭） */
+  profileEnrichmentEnabled: boolean;
 }
 
 export const DEFAULT_POLICY: V01Policy = {
@@ -24,4 +26,5 @@ export const DEFAULT_POLICY: V01Policy = {
   allowedGenders: ['female'],
   keepUnknownGender: true,
   hideExcluded: true,
+  profileEnrichmentEnabled: false,
 };

@@ -37,7 +37,8 @@ export class LiveFilterApp {
     calibrationGate?: GenderCalibrationGate,
     customBreaker?: CircuitBreaker,
     identityStore?: FeedIdentityStore,
-    schedulerOptions?: { maxConcurrency?: number; minIntervalMs?: number }
+    schedulerOptions?: { maxConcurrency?: number; minIntervalMs?: number },
+    initialPolicy?: Partial<V01Policy>
   ) {
     // 读取持久化策略
     const savedKeyword = StorageAdapter.get<string>('contentKeyword', '');
@@ -45,6 +46,8 @@ export class LiveFilterApp {
     const savedKeepUnknownRegion = StorageAdapter.get<boolean>('keepUnknownRegion', DEFAULT_POLICY.keepUnknownRegion);
     const savedGenders = StorageAdapter.get<string[]>('allowedGenders', DEFAULT_POLICY.allowedGenders);
     const savedKeepUnknownGender = StorageAdapter.get<boolean>('keepUnknownGender', DEFAULT_POLICY.keepUnknownGender);
+    // 显式授权门禁：未显式开启或旧用户缺省时严格 Fail-Closed 为 false
+    const savedEnrichmentEnabled = StorageAdapter.get<boolean>('profileEnrichmentEnabled', DEFAULT_POLICY.profileEnrichmentEnabled);
 
     this.policy = {
       contentKeyword: savedKeyword,
@@ -53,6 +56,8 @@ export class LiveFilterApp {
       allowedGenders: savedGenders,
       keepUnknownGender: savedKeepUnknownGender,
       hideExcluded: true,
+      profileEnrichmentEnabled: savedEnrichmentEnabled,
+      ...initialPolicy,
     };
 
     this.cache = new ProfileCache();
@@ -161,6 +166,11 @@ export class LiveFilterApp {
   }
 
   private isEnrichmentNeeded(): boolean {
+    // 显式授权门禁：未显式开启时，严格 Fail-Closed，产生 0 主动请求
+    if (!this.policy.profileEnrichmentEnabled) {
+      return false;
+    }
+
     // 只有当当前策略实际需要 Profile Facts 时才启动网络请求：
     // 1. 设置了目标属地（preferredRegions.length > 0）
     // 2. 或性别门禁已校准（gender gate === CALIBRATED）
@@ -202,6 +212,11 @@ export class LiveFilterApp {
       cardElement,
       priority: this.scheduler.getCardPriority(cardElement),
       execute: async () => {
+        // 第二层门禁：任务出队执行前再次复核用户授权门禁与需求状态
+        if (!this.isEnrichmentNeeded()) {
+          return;
+        }
+
         try {
           const facts = await this.fetcher.fetchProfileFacts(userId);
           facts.gender = this.calibrationGate.normalize(facts.rawGender);
@@ -247,9 +262,13 @@ export class LiveFilterApp {
     StorageAdapter.set('keepUnknownGender', this.policy.keepUnknownGender);
     StorageAdapter.set('preferredRegions', this.policy.preferredRegions);
     StorageAdapter.set('keepUnknownRegion', this.policy.keepUnknownRegion);
+    StorageAdapter.set('profileEnrichmentEnabled', this.policy.profileEnrichmentEnabled);
 
-    // 如果从“无筛选”变为“有属地筛选/性别筛选”，为当前卡片按需补发 enrichment
-    if (!wasEnrichmentNeeded && this.isEnrichmentNeeded()) {
+    if (!this.policy.profileEnrichmentEnabled) {
+      // 授权关闭：立即清除待处理排队任务，停止后续请求
+      this.scheduler.clearPendingQueue();
+    } else if (!wasEnrichmentNeeded && this.isEnrichmentNeeded()) {
+      // 如果从“不需要”变为“需要 enrichment”，为当前未缓存卡片按需调度
       for (const info of this.cards.values()) {
         if (info.userId && !this.cache.get(info.userId) && !this.factsMap.has(info.userId)) {
           this.enqueueEnrichment(info.userId, info.cardElement);

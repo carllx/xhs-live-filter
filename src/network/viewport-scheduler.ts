@@ -121,6 +121,13 @@ export class ViewportScheduler {
     return this.inFlightUserIds.has(userId) || this.queue.some((t) => t.userId === userId);
   }
 
+  /**
+   * 清空所有待处理的排队任务（当用户关闭授权门禁时立即调用，停止后续请求）
+   */
+  clearPendingQueue(): void {
+    this.queue = [];
+  }
+
   private reorderQueue(): void {
     // 1. 同步卡片当前最新视口优先级
     for (const item of this.queue) {

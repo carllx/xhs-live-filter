@@ -35,6 +35,7 @@ export class FilterUI {
   private keepUnknownGenderCheckbox!: HTMLInputElement;
   private regionInput!: HTMLInputElement;
   private keepUnknownRegionCheckbox!: HTMLInputElement;
+  private profileEnrichmentCheckbox!: HTMLInputElement;
   private genderNoticeEl!: HTMLElement;
   private calibrationStatus: 'UNCALIBRATED' | 'CALIBRATED' = 'UNCALIBRATED';
 
@@ -108,11 +109,18 @@ export class FilterUI {
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
           <label style="font-weight: 600; font-size: 12px; color: #555;">属地筛选 (留空不限)</label>
         </div>
-        <input type="text" class="region-input" value="广东" placeholder="如：广东, 上海 (逗号分隔)" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; outline: none; margin-bottom: 6px;" />
-        <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #666; cursor: pointer;">
+        <input type="text" class="region-input" value="" placeholder="如：广东, 上海 (逗号分隔)" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; outline: none; margin-bottom: 6px;" />
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #666; cursor: pointer; margin-bottom: 4px;">
           <input type="checkbox" class="keep-unknown-region" checked />
           <span>保留未知属地的主播 (Fail-Open)</span>
         </label>
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #333; cursor: pointer;">
+          <input type="checkbox" class="profile-enrichment-enabled" />
+          <span style="font-weight: 600;">启用匿名属地补全</span>
+        </label>
+        <div class="enrichment-desc" style="font-size: 10px; color: #888; margin-top: 2px; margin-left: 18px;">
+          关闭时不主动请求主播主页；开启后仅匿名、低频补全公开属地。
+        </div>
       </div>
 
       <!-- 性别筛选 (真实性门禁) -->
@@ -171,6 +179,7 @@ export class FilterUI {
     this.keepUnknownGenderCheckbox = this.panelEl.querySelector('.keep-unknown-gender') as HTMLInputElement;
     this.regionInput = this.panelEl.querySelector('.region-input') as HTMLInputElement;
     this.keepUnknownRegionCheckbox = this.panelEl.querySelector('.keep-unknown-region') as HTMLInputElement;
+    this.profileEnrichmentCheckbox = this.panelEl.querySelector('.profile-enrichment-enabled') as HTMLInputElement;
     this.genderNoticeEl = this.panelEl.querySelector('.gender-notice') as HTMLElement;
 
     if (initialPolicy) {
@@ -212,6 +221,7 @@ export class FilterUI {
 
       const keepUnknownRegion = this.keepUnknownRegionCheckbox.checked;
       const keepUnknownGender = this.keepUnknownGenderCheckbox.checked;
+      const profileEnrichmentEnabled = this.profileEnrichmentCheckbox.checked;
 
       if (this.events.onPolicyChange) {
         this.events.onPolicyChange({
@@ -219,6 +229,7 @@ export class FilterUI {
           keepUnknownGender,
           preferredRegions: regions,
           keepUnknownRegion,
+          profileEnrichmentEnabled,
         });
       }
     };
@@ -228,6 +239,7 @@ export class FilterUI {
     this.keepUnknownGenderCheckbox.addEventListener('change', handlePolicyUpdate);
     this.regionInput.addEventListener('input', handlePolicyUpdate);
     this.keepUnknownRegionCheckbox.addEventListener('change', handlePolicyUpdate);
+    this.profileEnrichmentCheckbox.addEventListener('change', handlePolicyUpdate);
   }
 
   syncPolicyToUI(policy: V01Policy): void {
@@ -237,6 +249,7 @@ export class FilterUI {
     this.keepUnknownGenderCheckbox.checked = policy.keepUnknownGender;
     this.regionInput.value = policy.preferredRegions.join(', ');
     this.keepUnknownRegionCheckbox.checked = policy.keepUnknownRegion;
+    this.profileEnrichmentCheckbox.checked = policy.profileEnrichmentEnabled;
   }
 
   setCalibrationStatus(status: 'UNCALIBRATED' | 'CALIBRATED'): void {

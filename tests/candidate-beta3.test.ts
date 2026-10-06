@@ -11,6 +11,7 @@ describe('v0.1.3-beta.3 Candidate Verification', () => {
 
   beforeEach(() => {
     localStorage.clear();
+    localStorage.setItem('xhs_filter_profileEnrichmentEnabled', JSON.stringify(true));
     document.body.innerHTML = '';
     fixture = createLiveSquareFixture();
     document.body.appendChild(fixture);

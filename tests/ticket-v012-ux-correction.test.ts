@@ -9,6 +9,7 @@ describe('v0.1.2 UX / Filtering Correction & Truthful Controls', () => {
 
   beforeEach(() => {
     localStorage.clear();
+    localStorage.setItem('xhs_filter_profileEnrichmentEnabled', JSON.stringify(true));
     document.body.innerHTML = '';
     fixture = createLiveSquareFixture();
     document.body.appendChild(fixture);

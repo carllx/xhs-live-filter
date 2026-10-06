@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xhs-live-filter
 // @namespace    https://github.com/carllx/xhs-live-filter
-// @version      0.1.3-beta.4
+// @version      0.1.3-beta.5
 // @description  小红书直播广场智能过滤器
 // @author       carllx
 // @match        https://www.xiaohongshu.com/*
@@ -227,7 +227,8 @@
     keepUnknownRegion: true,
     allowedGenders: ["female"],
     keepUnknownGender: true,
-    hideExcluded: true
+    hideExcluded: true,
+    profileEnrichmentEnabled: false
   };
 
   // src/dom/card-extractor.ts
@@ -936,6 +937,12 @@
     isInFlightOrQueued(userId) {
       return this.inFlightUserIds.has(userId) || this.queue.some((t) => t.userId === userId);
     }
+    /**
+     * 清空所有待处理的排队任务（当用户关闭授权门禁时立即调用，停止后续请求）
+     */
+    clearPendingQueue() {
+      this.queue = [];
+    }
     reorderQueue() {
       for (const item of this.queue) {
         item.priority = this.getCardPriority(item.cardElement);
@@ -1013,6 +1020,7 @@
     keepUnknownGenderCheckbox;
     regionInput;
     keepUnknownRegionCheckbox;
+    profileEnrichmentCheckbox;
     genderNoticeEl;
     calibrationStatus = "UNCALIBRATED";
     constructor(events, initialPolicy) {
@@ -1081,11 +1089,18 @@
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
           <label style="font-weight: 600; font-size: 12px; color: #555;">\u5C5E\u5730\u7B5B\u9009 (\u7559\u7A7A\u4E0D\u9650)</label>
         </div>
-        <input type="text" class="region-input" value="\u5E7F\u4E1C" placeholder="\u5982\uFF1A\u5E7F\u4E1C, \u4E0A\u6D77 (\u9017\u53F7\u5206\u9694)" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; outline: none; margin-bottom: 6px;" />
-        <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #666; cursor: pointer;">
+        <input type="text" class="region-input" value="" placeholder="\u5982\uFF1A\u5E7F\u4E1C, \u4E0A\u6D77 (\u9017\u53F7\u5206\u9694)" style="width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; outline: none; margin-bottom: 6px;" />
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #666; cursor: pointer; margin-bottom: 4px;">
           <input type="checkbox" class="keep-unknown-region" checked />
           <span>\u4FDD\u7559\u672A\u77E5\u5C5E\u5730\u7684\u4E3B\u64AD (Fail-Open)</span>
         </label>
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #333; cursor: pointer;">
+          <input type="checkbox" class="profile-enrichment-enabled" />
+          <span style="font-weight: 600;">\u542F\u7528\u533F\u540D\u5C5E\u5730\u8865\u5168</span>
+        </label>
+        <div class="enrichment-desc" style="font-size: 10px; color: #888; margin-top: 2px; margin-left: 18px;">
+          \u5173\u95ED\u65F6\u4E0D\u4E3B\u52A8\u8BF7\u6C42\u4E3B\u64AD\u4E3B\u9875\uFF1B\u5F00\u542F\u540E\u4EC5\u533F\u540D\u3001\u4F4E\u9891\u8865\u5168\u516C\u5F00\u5C5E\u5730\u3002
+        </div>
       </div>
 
       <!-- \u6027\u522B\u7B5B\u9009 (\u771F\u5B9E\u6027\u95E8\u7981) -->
@@ -1140,6 +1155,7 @@
       this.keepUnknownGenderCheckbox = this.panelEl.querySelector(".keep-unknown-gender");
       this.regionInput = this.panelEl.querySelector(".region-input");
       this.keepUnknownRegionCheckbox = this.panelEl.querySelector(".keep-unknown-region");
+      this.profileEnrichmentCheckbox = this.panelEl.querySelector(".profile-enrichment-enabled");
       this.genderNoticeEl = this.panelEl.querySelector(".gender-notice");
       if (initialPolicy) {
         this.syncPolicyToUI(initialPolicy);
@@ -1169,12 +1185,14 @@
         const regions = this.regionInput.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
         const keepUnknownRegion = this.keepUnknownRegionCheckbox.checked;
         const keepUnknownGender = this.keepUnknownGenderCheckbox.checked;
+        const profileEnrichmentEnabled = this.profileEnrichmentCheckbox.checked;
         if (this.events.onPolicyChange) {
           this.events.onPolicyChange({
             allowedGenders,
             keepUnknownGender,
             preferredRegions: regions,
-            keepUnknownRegion
+            keepUnknownRegion,
+            profileEnrichmentEnabled
           });
         }
       };
@@ -1183,6 +1201,7 @@
       this.keepUnknownGenderCheckbox.addEventListener("change", handlePolicyUpdate);
       this.regionInput.addEventListener("input", handlePolicyUpdate);
       this.keepUnknownRegionCheckbox.addEventListener("change", handlePolicyUpdate);
+      this.profileEnrichmentCheckbox.addEventListener("change", handlePolicyUpdate);
     }
     syncPolicyToUI(policy) {
       this.keywordInput.value = policy.contentKeyword;
@@ -1191,6 +1210,7 @@
       this.keepUnknownGenderCheckbox.checked = policy.keepUnknownGender;
       this.regionInput.value = policy.preferredRegions.join(", ");
       this.keepUnknownRegionCheckbox.checked = policy.keepUnknownRegion;
+      this.profileEnrichmentCheckbox.checked = policy.profileEnrichmentEnabled;
     }
     setCalibrationStatus(status) {
       this.calibrationStatus = status;
@@ -1289,19 +1309,22 @@
     identityStore;
     unsubscribeIdentityStore;
     boundCardCount = 0;
-    constructor(customFetcher, calibrationGate, customBreaker, identityStore, schedulerOptions) {
+    constructor(customFetcher, calibrationGate, customBreaker, identityStore, schedulerOptions, initialPolicy) {
       const savedKeyword = StorageAdapter.get("contentKeyword", "");
       const savedRegions = StorageAdapter.get("preferredRegions", DEFAULT_POLICY.preferredRegions);
       const savedKeepUnknownRegion = StorageAdapter.get("keepUnknownRegion", DEFAULT_POLICY.keepUnknownRegion);
       const savedGenders = StorageAdapter.get("allowedGenders", DEFAULT_POLICY.allowedGenders);
       const savedKeepUnknownGender = StorageAdapter.get("keepUnknownGender", DEFAULT_POLICY.keepUnknownGender);
+      const savedEnrichmentEnabled = StorageAdapter.get("profileEnrichmentEnabled", DEFAULT_POLICY.profileEnrichmentEnabled);
       this.policy = {
         contentKeyword: savedKeyword,
         preferredRegions: savedRegions,
         keepUnknownRegion: savedKeepUnknownRegion,
         allowedGenders: savedGenders,
         keepUnknownGender: savedKeepUnknownGender,
-        hideExcluded: true
+        hideExcluded: true,
+        profileEnrichmentEnabled: savedEnrichmentEnabled,
+        ...initialPolicy
       };
       this.cache = new ProfileCache();
       this.fetcher = customFetcher || new ProfileFetcher();
@@ -1384,6 +1407,9 @@
       this.updateStats();
     }
     isEnrichmentNeeded() {
+      if (!this.policy.profileEnrichmentEnabled) {
+        return false;
+      }
       const hasRegionFilter = this.policy.preferredRegions.length > 0;
       const isGenderCalibrated = this.calibrationGate.getStatus() === "CALIBRATED";
       return hasRegionFilter || isGenderCalibrated;
@@ -1415,6 +1441,9 @@
         cardElement,
         priority: this.scheduler.getCardPriority(cardElement),
         execute: async () => {
+          if (!this.isEnrichmentNeeded()) {
+            return;
+          }
           try {
             const facts = await this.fetcher.fetchProfileFacts(userId);
             facts.gender = this.calibrationGate.normalize(facts.rawGender);
@@ -1454,7 +1483,10 @@
       StorageAdapter.set("keepUnknownGender", this.policy.keepUnknownGender);
       StorageAdapter.set("preferredRegions", this.policy.preferredRegions);
       StorageAdapter.set("keepUnknownRegion", this.policy.keepUnknownRegion);
-      if (!wasEnrichmentNeeded && this.isEnrichmentNeeded()) {
+      StorageAdapter.set("profileEnrichmentEnabled", this.policy.profileEnrichmentEnabled);
+      if (!this.policy.profileEnrichmentEnabled) {
+        this.scheduler.clearPendingQueue();
+      } else if (!wasEnrichmentNeeded && this.isEnrichmentNeeded()) {
         for (const info of this.cards.values()) {
           if (info.userId && !this.cache.get(info.userId) && !this.factsMap.has(info.userId)) {
             this.enqueueEnrichment(info.userId, info.cardElement);
@@ -1735,7 +1767,7 @@
     window.__XHS_LIVE_FILTER_LOADED__ = true;
     const app = new LiveFilterApp();
     app.start(document.body);
-    console.log("[xhs-live-filter] v0.1.3-beta.4 candidate started successfully");
+    console.log("[xhs-live-filter] v0.1.3-beta.5 candidate started successfully");
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", bootstrap, { once: true });

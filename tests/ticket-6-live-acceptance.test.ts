@@ -8,6 +8,7 @@ describe('Ticket #6: Bounded Live Acceptance & Release Verification', () => {
 
   beforeEach(() => {
     localStorage.clear();
+    localStorage.setItem('xhs_filter_profileEnrichmentEnabled', JSON.stringify(true));
     document.body.innerHTML = '';
 
     // 构造模拟小红书直播/混排页面的 DOM 结构

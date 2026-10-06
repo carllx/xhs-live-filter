@@ -461,7 +461,7 @@ describe('v0.1.3 Squarefeed Interception & Anchor Identity Binding', () => {
     });
 
     const app = new LiveFilterApp(mockFetcher, new GenderCalibrationGate(), undefined, store);
-    app.setPolicy({ preferredRegions: ['广东'], keepUnknownRegion: false });
+    app.setPolicy({ preferredRegions: ['广东'], keepUnknownRegion: false, profileEnrichmentEnabled: true });
     app.start(document.body);
 
     const cardGd = document.createElement('div');

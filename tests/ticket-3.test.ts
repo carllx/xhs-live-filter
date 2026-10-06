@@ -10,6 +10,7 @@ describe('Ticket #3: Visible-card Profile Enrichment + 广东优先闭环', () =
 
   beforeEach(() => {
     localStorage.clear();
+    localStorage.setItem('xhs_filter_profileEnrichmentEnabled', JSON.stringify(true));
     document.body.innerHTML = '';
     fixture = createLiveSquareFixture();
     document.body.appendChild(fixture);

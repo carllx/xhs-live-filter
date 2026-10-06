@@ -162,7 +162,7 @@ describe('Safety Hardening Regression (v0.1.3-beta.4)', () => {
       });
       const fetcher = new ProfileFetcher(fetchFn);
       app = new LiveFilterApp(fetcher, undefined, undefined, undefined, { minIntervalMs: 20 });
-      app.setPolicy({ preferredRegions: ['广东'] });
+      app.setPolicy({ preferredRegions: ['广东'], profileEnrichmentEnabled: true });
 
       // 卡片 1 与 备选卡片拥有相同 userId 'user_001'
       const duplicateCard = document.createElement('div');
@@ -195,7 +195,7 @@ describe('Safety Hardening Regression (v0.1.3-beta.4)', () => {
       store.clear();
 
       app = new LiveFilterApp(fetcher, undefined, undefined, store, { minIntervalMs: 20 });
-      app.setPolicy({ preferredRegions: ['广东'] });
+      app.setPolicy({ preferredRegions: ['广东'], profileEnrichmentEnabled: true });
 
       store.addIdentity({ liveId: 'live_slow_1', userId: 'slow_user', title: '1', nickname: '1' });
       store.addIdentity({ liveId: 'live_slow_2', userId: 'slow_user', title: '2', nickname: '2' });
@@ -251,7 +251,7 @@ describe('Safety Hardening Regression (v0.1.3-beta.4)', () => {
       const fetcher = new ProfileFetcher(fetchFn);
 
       app = new LiveFilterApp(fetcher, undefined, undefined, undefined, { minIntervalMs: 20 });
-      app.setPolicy({ preferredRegions: [] }); // 初始不限属地
+      app.setPolicy({ preferredRegions: [], profileEnrichmentEnabled: true }); // 初始不限属地但已授权
       app.start(fixture);
 
       await new Promise((r) => setTimeout(r, 50));
@@ -276,6 +276,7 @@ describe('Safety Hardening Regression (v0.1.3-beta.4)', () => {
         });
         const fetcher = new ProfileFetcher(fetchFn);
         const testApp = new LiveFilterApp(fetcher);
+        testApp.setPolicy({ profileEnrichmentEnabled: true });
         testApp.start(fixture);
 
         await new Promise((r) => setTimeout(r, 80));
@@ -288,6 +289,7 @@ describe('Safety Hardening Regression (v0.1.3-beta.4)', () => {
       const fetchFn = vi.fn().mockResolvedValue({ status: 429, text: 'Too Many Requests' });
       const fetcher = new ProfileFetcher(fetchFn);
       app = new LiveFilterApp(fetcher);
+      app.setPolicy({ profileEnrichmentEnabled: true });
       app.start(fixture);
 
       await new Promise((r) => setTimeout(r, 80));
@@ -301,6 +303,7 @@ describe('Safety Hardening Regression (v0.1.3-beta.4)', () => {
       });
       const fetcher = new ProfileFetcher(fetchFn);
       app = new LiveFilterApp(fetcher);
+      app.setPolicy({ profileEnrichmentEnabled: true });
       app.start(fixture);
 
       await new Promise((r) => setTimeout(r, 80));
@@ -316,6 +319,7 @@ describe('Safety Hardening Regression (v0.1.3-beta.4)', () => {
 
       const fetcher = new ProfileFetcher(fetchFn);
       app = new LiveFilterApp(fetcher);
+      app.setPolicy({ profileEnrichmentEnabled: true });
       app.start(fixture);
 
       await new Promise((r) => setTimeout(r, 80));
