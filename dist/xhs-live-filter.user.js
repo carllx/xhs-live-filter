@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         xhs-live-filter
 // @namespace    https://github.com/carllx/xhs-live-filter
-// @version      0.1.2
+// @version      0.1.3-beta.1
 // @description  小红书直播广场智能过滤器
 // @author       carllx
 // @match        https://www.xiaohongshu.com/*
@@ -1492,7 +1492,7 @@
     window.__XHS_LIVE_FILTER_LOADED__ = true;
     const app = new LiveFilterApp();
     app.start(document.body);
-    console.log("[xhs-live-filter] v0.1.3-candidate started successfully");
+    console.log("[xhs-live-filter] v0.1.3-beta.1 candidate started successfully");
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", bootstrap, { once: true });

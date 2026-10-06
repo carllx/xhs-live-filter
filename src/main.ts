@@ -30,7 +30,7 @@ function bootstrap(): void {
 
   const app = new LiveFilterApp();
   app.start(document.body);
-  console.log('[xhs-live-filter] v0.1.3-candidate started successfully');
+  console.log('[xhs-live-filter] v0.1.3-beta.1 candidate started successfully');
 }
 
 if (document.readyState === 'loading') {
